@@ -1,5 +1,6 @@
 // Quickgres is a PostgreSQL client library.
 const net = require('net');
+const tls = require('tls');
 const crypto = require('crypto');
 const assert = require('assert');
 
@@ -59,9 +60,7 @@ class Client {
     }
     connect(address, host) {
         this._connection = net.createConnection(address, host);
-        this._connection.on('connect', this.onConnect.bind(this));
-        this._connection.on('data', this.onData.bind(this));
-        this._connection.on('error', this.onError.bind(this));
+        this._connection.once('connect', this.onInitialConnect.bind(this));
         return new Promise(this.packetExecutor);
     }
     end() { 
@@ -75,12 +74,29 @@ class Client {
             outStream.reject(err);
         }
     }
+    onInitialConnect() {
+        if (this.config.ssl) {
+            this._connection.once('data', this.onSSLResponse.bind(this));
+            w32(this._wbuf, 8, 0);
+            w32(this._wbuf, 80877103, 4);  // SSL Request
+            this._connection.write(slice(this._wbuf, 0, 8));
+        } else {
+            this.onConnect();
+        }
+    }
+    onSSLResponse(buffer) {
+        if (buffer[0] !== 83) throw Error("Error establishing an SSL connection");
+        this._connection = tls.connect({socket: this._connection, ...this.config.ssl}, this.onConnect.bind(this));
+    }
     onConnect() {
+        this._connection.on('data', this.onData.bind(this));
+        this._connection.on('error', this.onError.bind(this));
         let off = 4;
         off = w16(this._wbuf, 3, off); // Protocol major version 3
         off = w16(this._wbuf, 0, off); // Protocol minor version 0
+        const filteredKeys = {password: 1, ssl: 1};
         for (let n in this.config) {
-            if (n === 'password') continue;
+            if (filteredKeys[n]) continue;
             off = wstr(this._wbuf, n, off);
             off = wstr(this._wbuf, this.config[n], off);
         }
@@ -190,8 +206,12 @@ class Client {
     }
     getRowParser(statement, buf) {
         const parsed = this._parsedStatements[statement];
-        if (!parsed) return buf ? new RowParser(buf) : true;
-        if (!parsed.rowParser) parsed.rowParser = buf ? new RowParser(buf) : true;
+        if (!parsed) {
+            return buf ? new RowParser(buf) : true;
+        }
+        if (!parsed.rowParser) {
+            parsed.rowParser = buf ? new RowParser(buf) : true;
+        }
         return parsed.rowParser;
     }
     getParsedStatement(statement) {
@@ -206,7 +226,11 @@ class Client {
         return parsed;
     }
     packetExecutor(resolve, reject) { this._outStreams.push({resolve, reject}); }
-    streamExecutor(resolve, reject) { this._outStreams.push({stream: this._tmpStream, statement: this._tmpStatement, resolve, reject}); }
+    streamExecutor(resolve, reject) {
+        this._outStreams.push({stream: this._tmpStream, statement: this._tmpStatement, resolve, reject}); 
+        this._tmpStatement = null;
+        this._tmpStream = null;
+    }
     streamPromise(stream) {
         this._tmpStream = stream;
         return new Promise(this.streamExecutor);
