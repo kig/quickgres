@@ -48,7 +48,7 @@ class Client {
         this._parsedStatementCount = 1;
         this._parsedStatements = {};
         this._packet = { buf: Buffer.alloc(1e6), cmd: 0, len: 0, idx: 0 };
-        this._wbuf = Buffer.alloc(65536);
+        this._wbuf = Buffer.alloc(1e6);
         this._outStreams = [];
         this._outStreamsStartIndex = 0;
         this.authenticationOk = false;
@@ -130,14 +130,22 @@ class Client {
         const outStream = this._outStreams[this._outStreamsStartIndex];
         switch (cmd) {
             case 68: // D -- DataRow
-            case 67: // C -- CommandComplete
-            case 73: // I -- EmptyQueryResponse
-            case 112: // p -- PortalSuspended
+            case 72: // CopyOutResponse
                 if (outStream) {
                     if (!outStream.stream.rowParser) outStream.stream.rowParser = this.getRowParser(outStream.statement);
                     outStream.stream.write(buf.slice(0, length+1));
                 }
                 break;
+            case 67: // C -- CommandComplete
+            case 73: // I -- EmptyQueryResponse
+            case 112: // p -- PortalSuspended
+            case 71: // CopyInResponse
+            case 87: // CopyBothResponse
+            case 99: // CopyDone
+            case 100: // CopyData
+                if (outStream) outStream.stream.write(buf.slice(0, length+1));
+                break;
+            case 110: // NoData
             case 116: // ParameterDescription
                 break;
             case 84: // T -- RowDescription
@@ -163,13 +171,7 @@ class Client {
                     outStream.resolve(outStream.stream);
                 }
                 break;
-            case 71: // CopyInResponse
-            case 72: // CopyOutResponse
-            case 87: // CopyBothResponse
-            case 99: // CopyDone
-            case 100: // CopyData
             case 118: // NegotiateProtocolVersion
-            case 110: // NoData
             case 78: // NoticeResponse
             case 65: // NotificationResponse
                 console.error(cmd, String.fromCharCode(cmd), length, buf.toString('utf8', off, off + length - 4));
@@ -204,8 +206,8 @@ class Client {
     }
     getRowParser(statement, buf) {
         const parsed = this._parsedStatements[statement];
-        if (!parsed) return new RowParser(buf);
-        if (!parsed.rowParser) parsed.rowParser = new RowParser(buf);
+        if (!parsed) return buf ? new RowParser(buf) : true;
+        if (!parsed.rowParser) parsed.rowParser = buf ? new RowParser(buf) : true;
         return parsed.rowParser;
     }
     getParsedStatement(statement) {

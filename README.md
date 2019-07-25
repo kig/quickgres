@@ -13,12 +13,14 @@ Features
 Lacking
  * SSL
  * Server-side function calls
+ * Cursors
  * SASL authentication
- * COPY protocol (For rapid reading and writing data?)
+ * COPY protocol parser (For rapid reading and writing data.)
  * Streaming replication (Does anyone want this?)
  * No type parsing (This is more like a feature.)
+ * Queries where the statement is larger than 1MB will silently fail (How about bounds checking for scratchpads?)
 
-What's it good for? It's relatively fast, and you can read it through and not worry about npm dephell.
+What's it good for? It's relatively small so you can read it. It doesn't have deps, so you don't need to worry about npm dephell. Performance-wise it's around similar speed as `psql -Az0` for selecting a million rows to objects. For streaming raw results to `/dev/null`, it's about 50% faster (similar to `psql -c "COPY table TO STDOUT (FORMAT text)"`). The fastest way to dump a table is still `psql -c "COPY table to STDOUT (FORMAT binary)"` though.
 
 There is no test suite, write one.
 
