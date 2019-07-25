@@ -1,4 +1,4 @@
-# Quickgres 0.1.1
+# Quickgres 0.1.2-rc0
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -7,12 +7,10 @@ It's around 400 lines of code, with no external dependencies.
 Features
  * Only the query protocol is supported (along with prepared statements and portals).
  * Plaintext & MD5 password authentication over unencrypted sockets.
- * There are untested endpoints for calling server-side functions but no result parser. Ditto for the copy protocol.
  * Each parameterized query creates a prepared statement. If you're generating queries on the fly, use simpleQuery instead.
 
 Lacking
  * SSL
- * Server-side function calls
  * Cursors
  * SASL authentication
  * COPY protocol parser (For rapid reading and writing data.)
@@ -20,7 +18,9 @@ Lacking
  * No type parsing (This is more like a feature.)
  * Queries where the statement is larger than 1MB will silently fail (How about bounds checking for scratchpads?)
 
-What's it good for? It's relatively small so you can read it. It doesn't have deps, so you don't need to worry about npm dephell. Performance-wise it's around similar speed as `psql -Az0` for selecting a million rows to objects. For streaming raw results to `/dev/null`, it's about 50% faster (similar to `psql -c "COPY table TO STDOUT (FORMAT text)"`). The fastest way to dump a table is still `psql -c "COPY table to STDOUT (FORMAT binary)"` though.
+What's it good for? It's relatively small so you can read it. It doesn't have deps, so you don't need to worry about npm dephell. Mostly use it for bed-time reading.
+
+Performance-wise it's around similar speed as `psql -Az0` for selecting a million rows to objects. For streaming raw results to `/dev/null`, it's about 50% faster (similar to `psql -c "COPY table TO STDOUT (FORMAT text)"`). The fastest way to dump a table is still `psql -c "COPY table to STDOUT (FORMAT binary)"` though.
 
 There is no test suite, write one.
 

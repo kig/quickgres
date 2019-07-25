@@ -124,10 +124,8 @@ class Client {
             this._outStreams.splice(0, 100);
         }
     }
-    processPacket(packet) {
+    processPacket(packet, off=5, outStream=this._outStreams[this._outStreamsStartIndex]) {
         const { buf, cmd, length } = packet;
-        let off = 5;
-        const outStream = this._outStreams[this._outStreamsStartIndex];
         switch (cmd) {
             case 68: // D -- DataRow
             case 72: // CopyOutResponse
@@ -136,6 +134,8 @@ class Client {
                     outStream.stream.write(buf.slice(0, length+1));
                 }
                 break;
+            case 84: // T -- RowDescription
+                if (outStream) outStream.stream.rowParser = this.getRowParser(outStream.statement, buf);
             case 67: // C -- CommandComplete
             case 73: // I -- EmptyQueryResponse
             case 112: // p -- PortalSuspended
@@ -144,23 +144,8 @@ class Client {
             case 99: // CopyDone
             case 100: // CopyData
                 if (outStream) outStream.stream.write(buf.slice(0, length+1));
-                break;
             case 110: // NoData
             case 116: // ParameterDescription
-                break;
-            case 84: // T -- RowDescription
-                if (outStream) {
-                    outStream.stream.rowParser = this.getRowParser(outStream.statement, buf);
-                    outStream.stream.write(buf.slice(0, length+1));
-                }
-                break;
-            case 86: // FunctionCallResponse
-                if (outStream) {
-                    this.advanceOutStreams();
-                    outStream.stream.write(buf.slice(0, length+1));
-                    outStream.resolve(outStream.stream);
-                }
-                break;
             case 49: // 1 -- ParseComplete
             case 50: // 2 -- BindComplete
             case 51: // 3 -- CloseComplete
@@ -170,11 +155,6 @@ class Client {
                     this.advanceOutStreams();
                     outStream.resolve(outStream.stream);
                 }
-                break;
-            case 118: // NegotiateProtocolVersion
-            case 78: // NoticeResponse
-            case 65: // NotificationResponse
-                console.error(cmd, String.fromCharCode(cmd), length, buf.toString('utf8', off, off + length - 4));
                 break;
             case 69: // E -- Error
                 const fieldType = buf[off]; ++off;
@@ -200,6 +180,10 @@ class Client {
             case 75: // K -- BackendKeyData
                 this.backendKey = Buffer.from(buf.slice(off, off + length - 4));
                 break;
+            case 118: // NegotiateProtocolVersion
+            case 78: // NoticeResponse
+            case 65: // NotificationResponse
+            case 86: // FunctionCallResponse -- Legacy, not supported.
             default:
                 console.error(cmd, String.fromCharCode(cmd), length, buf.toString('utf8', off, off + length - 4));
         }
@@ -277,18 +261,6 @@ class Client {
     }
     describeStatement(name) { return this.describe(83, name); } // S -- Statement
     describePortal(name) { return this.describe(80, name); } // P -- Portal
-    functionCall(oid, args=[], argTypes=[], binary=0, promise=new Promise(this.packetExecutor)) {
-        let off = 5; this._wbuf[0] = 70; // F -- FunctionCall
-        off = w32(this._wbuf, oid, off);
-        off = w16(this._wbuf, argTypes.length, off);
-        for (let i = 0; i < argTypes.length; i++) off = w16(this._wbuf, argTypes[i], off);
-        off = w16(this._wbuf, args.length, off);
-        for (let i = 0; i < argTypes.length; i++) off = wstrLen(this._wbuf, args[i], off);
-        off = w16(this._wbuf, binary, off);
-        w32(this._wbuf, off-1, 1);
-        this._connection.write(slice(this._wbuf, 0, off));
-        return promise;
-    }
     authResponse(buffer) { return this.bufferCmd(112, buffer); } // p -- PasswordMessage/GSSResponse/SASLInitialResponse/SASLResponse
     copyData(buffer) { return this.bufferCmd(100, buffer); } // d -- CopyData
     copyFail(buffer) { return this.bufferCmd(102, buffer); } // f -- CopyFail
