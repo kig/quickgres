@@ -39,7 +39,7 @@ function wstrLen(buf, str, off) { // Write buffer length, followed by buffer con
     return off + src.copy(buf, off);
 }
 function slice(buf, start, end) { // Copying slice, used to work around full sockets not copying write buffers
-    const dst = Buffer.allocUnsafe(end-start);
+    const dst = Buffer.allocUnsafe(end - start);
     buf.copy(dst, 0, start, end);
     return dst;
 }
@@ -144,7 +144,6 @@ class Client {
         const { buf, cmd, length } = packet;
         switch (cmd) {
             case 68: // D -- DataRow
-            case 72: // CopyOutResponse
                 if (outStream) {
                     if (!outStream.stream.rowParser) outStream.stream.rowParser = this.getRowParser(outStream.statement);
                     outStream.stream.write(buf.slice(0, length+1));
@@ -156,6 +155,7 @@ class Client {
             case 73: // I -- EmptyQueryResponse
             case 112: // p -- PortalSuspended
             case 71: // CopyInResponse
+            case 72: // CopyOutResponse
             case 87: // CopyBothResponse
             case 99: // CopyDone
             case 100: // CopyData
@@ -319,6 +319,9 @@ class Client {
         this._tmpStatement = statement;
         return this.sync(stream);
     }
+    copy(statement, values=[], stream=new CopyReader()) {
+        return this.query(statement, values, stream);
+    }
 }
 
 class ObjectReader {
@@ -337,6 +340,28 @@ class ArrayReader {
         else if (chunk[0] === 67) this.completes.push(this.rowParser.parseComplete(chunk)); // C -- CommandComplete
         else if (chunk[0] === 73) this.completes.push({cmd: 'EMPTY', oid: undefined, rowCount: 0}); // I -- EmptyQueryResult
         else if (chunk[0] === 112) this.completes.push({cmd: 'SUSPENDED', oid: undefined, rowCount: 0}); // p -- PortalSuspended
+    }
+}
+class CopyReader {
+    constructor() { this.rows = []; }
+    write(chunk, off=0) {
+        const cmd = chunk[off]; off++;
+        const length = r32(chunk, off); off += 4;
+        switch(cmd) {
+            case 100: // CopyData
+                this.rows.push(slice(chunk, off, off + length - 4));
+                break;
+            case 71: // CopyInResponse
+            case 87: // CopyBothResponse
+            case 72: // CopyOutResponse
+                this.format = chunk[off]; off++;
+                this.columnCount = r16(chunk, off); off += 2;
+                this.columnFormats = [];
+                for (let i = 0; i < this.columnCount; i++) this.columnFormats[i] = r16(chunk, off), off += 2;
+                break;
+            case 99: // CopyDone
+                this.completed = true;
+        }
     }
 }
 
@@ -382,4 +407,4 @@ class RowParser {
     }
 }
 
-module.exports = { Client, ObjectReader, ArrayReader, RowParser };
+module.exports = { Client, ObjectReader, ArrayReader, CopyReader, RowParser };
