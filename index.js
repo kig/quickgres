@@ -1,6 +1,16 @@
-// Quickgres is a PostgreSQL client library designed for simplicity.
+// Quickgres is a PostgreSQL client library.
 const net = require('net');
+const crypto = require('crypto');
+const assert = require('assert');
 
+function md5Auth(user, password, salt) {
+    assert(user !== undefined, "No user supplied");
+    assert(password !== undefined, "No password supplied");
+    assert(salt !== undefined, "No salt supplied");
+    const upHash = crypto.createHash('md5').update(password).update(user).digest('hex');
+    const salted = crypto.createHash('md5').update(upHash).update(salt).digest('hex');
+    return `md5${salted}\0`;
+}
 function r32(buf, off){ return (buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3]; }
 function r16(buf, off){ return (buf[off] << 8) | buf[off+1]; }
 
@@ -182,6 +192,7 @@ class Client {
                 const authResult = r32(buf, off); off += 4;
                 if (authResult === 0) this.authenticationOk = true;
                 else if (authResult === 3) this.authResponse(Buffer.from(this.config.password + '\0')); // 3 -- AuthenticationCleartextPassword
+                else if (authResult === 5) this.authResponse(Buffer.from(md5Auth(this.config.user, this.config.password, buf.slice(off, off+4)))); // 5 -- AuthenticationMD5Password
                 else { this.end(); throw(Error(`Authentication method ${authResult} not supported`)); }
                 break;
             case 75: // K -- BackendKeyData
@@ -193,6 +204,7 @@ class Client {
     }
     getRowParser(statement, buf) {
         const parsed = this._parsedStatements[statement];
+        if (!parsed) return new RowParser(buf);
         if (!parsed.rowParser) parsed.rowParser = new RowParser(buf);
         return parsed.rowParser;
     }
@@ -296,12 +308,11 @@ class Client {
         return promise;
     }
     simpleQuery(statement, stream=new ObjectReader()) {
-        const promise = this.streamPromise(stream);
         let off = 5; this._wbuf[0] = 81; // Q -- Query
         off = wstr(this._wbuf, statement, off);
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
-        return promise;
+        return this.streamPromise(stream);
     }
     query(statement, values=[], stream=new ObjectReader()) {
         const statementName = this.getParsedStatement(statement).name;

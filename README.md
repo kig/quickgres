@@ -1,15 +1,22 @@
-# Quickgres 0.1.0
+# Quickgres 0.1.1
 
-Quickgres is a native-JS PostgreSQL client library written to be read.
+Quickgres is a native-JS PostgreSQL client library.
 
 It's around 400 lines of code, with no external dependencies.
 
-Only the query protocol is supported (along with prepared statements and portals).
+Features
+ * Only the query protocol is supported (along with prepared statements and portals).
+ * Plaintext & MD5 password authentication over unencrypted sockets.
+ * There are untested endpoints for calling server-side functions but no result parser. Ditto for the copy protocol.
+ * Each parameterized query creates a prepared statement. If you're generating queries on the fly, use simpleQuery instead.
 
-Plaintext password authentication over unencrypted sockets.
-
-There are untested endpoints for calling server-side functions but no result parser.
-Ditto for the copy protocol.
+Lacking
+ * SSL
+ * Server-side function calls
+ * SASL authentication
+ * COPY protocol (For rapid reading and writing data?)
+ * Streaming replication (Does anyone want this?)
+ * No type parsing (This is more like a feature.)
 
 What's it good for? It's relatively fast, and you can read it through and not worry about npm dephell.
 
