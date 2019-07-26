@@ -4,14 +4,6 @@ const tls = require('tls');
 const crypto = require('crypto');
 const assert = require('assert');
 
-function md5Auth(user, password, salt) {
-    assert(user !== undefined, "No user supplied");
-    assert(password !== undefined, "No password supplied");
-    assert(salt !== undefined, "No salt supplied");
-    const upHash = crypto.createHash('md5').update(password).update(user).digest('hex');
-    const salted = crypto.createHash('md5').update(upHash).update(salt).digest('hex');
-    return `md5${salted}\0`;
-}
 function r32(buf, off){ return (buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3]; }
 function r16(buf, off){ return (buf[off] << 8) | buf[off+1]; }
 
@@ -51,7 +43,6 @@ class Client {
         this._packet = { buf: Buffer.alloc(1e6), cmd: 0, len: 0, idx: 0 };
         this._wbuf = Buffer.alloc(1e6);
         this._outStreams = [];
-        this._outStreamsStartIndex = 0;
         this.authenticationOk = false;
         this.serverParameters = {};
         this.packetExecutor = this.packetExecutor.bind(this);
@@ -67,13 +58,7 @@ class Client {
         this.terminate();
         return this._connection.end();
     }
-    onError(err) {
-        let outStream;
-        while (outStream = this._outStreams[this._outStreamsStartIndex]) {
-            this.advanceOutStreams();
-            outStream.reject(err);
-        }
-    }
+    onError(err) { this._outStreams.splice(0).forEach(s => s.reject(err)); }
     onInitialConnect() {
         if (this.config.ssl) {
             this._connection.once('data', this.onSSLResponse.bind(this));
@@ -132,25 +117,20 @@ class Client {
             }
         }
     }
-    advanceOutStreams() {
-        this._outStreams[this._outStreamsStartIndex] = null;
-        this._outStreamsStartIndex++;
-        if (this._outStreamsStartIndex === 100) {
-            this._outStreamsStartIndex = 0;
-            this._outStreams.splice(0, 100);
-        }
-    }
-    processPacket(packet, off=5, outStream=this._outStreams[this._outStreamsStartIndex]) {
+    processPacket(packet, off=5, outStream=this._outStreams[0]) {
         const { buf, cmd, length } = packet;
         switch (cmd) {
             case 68: // D -- DataRow
                 if (outStream) {
-                    if (!outStream.stream.rowParser) outStream.stream.rowParser = this.getRowParser(outStream.statement);
+                    outStream.stream.rowParser = outStream.parsed.rowParser;
                     outStream.stream.write(buf.slice(0, length+1));
                 }
                 break;
+            case 100: // CopyData
+                if (outStream) outStream.stream.write(buf.slice(0, length+1));
+                break;
             case 84: // T -- RowDescription
-                if (outStream) outStream.stream.rowParser = this.getRowParser(outStream.statement, buf);
+                if (outStream) outStream.parsed.rowParser = new RowParser(buf);
             case 67: // C -- CommandComplete
             case 73: // I -- EmptyQueryResponse
             case 112: // p -- PortalSuspended
@@ -158,7 +138,6 @@ class Client {
             case 72: // CopyOutResponse
             case 87: // CopyBothResponse
             case 99: // CopyDone
-            case 100: // CopyData
                 if (outStream) outStream.stream.write(buf.slice(0, length+1));
             case 110: // NoData
             case 116: // ParameterDescription
@@ -168,7 +147,7 @@ class Client {
                 break;
             case 90: // Z -- ReadyForQuery
                 if (outStream) {
-                    this.advanceOutStreams();
+                    this._outStreams.shift();
                     outStream.resolve(outStream.stream);
                 }
                 break;
@@ -177,7 +156,7 @@ class Client {
                 const string = buf.toString('utf8', off, off + length - 5);
                 console.error(cmd, String.fromCharCode(cmd), length, fieldType, string);
                 if (outStream) {
-                    this.advanceOutStreams();
+                    this._outStreams.shift();
                     outStream.reject(Error(string));
                 }
                 break;
@@ -189,9 +168,15 @@ class Client {
             case 82: // R -- Authentication
                 const authResult = r32(buf, off); off += 4;
                 if (authResult === 0) this.authenticationOk = true;
-                else if (authResult === 3) this.authResponse(Buffer.from(this.config.password + '\0')); // 3 -- AuthenticationCleartextPassword
-                else if (authResult === 5) this.authResponse(Buffer.from(md5Auth(this.config.user, this.config.password, buf.slice(off, off+4)))); // 5 -- AuthenticationMD5Password
-                else { this.end(); throw(Error(`Authentication method ${authResult} not supported`)); }
+                else if (authResult === 3) { // 3 -- AuthenticationCleartextPassword
+                    assert(this.config.password !== undefined, "No password supplied");
+                    this.authResponse(Buffer.from(this.config.password + '\0')); 
+                } else if (authResult === 5) { // 5 -- AuthenticationMD5Password
+                    assert(this.config.password !== undefined, "No password supplied");
+                    const upHash = crypto.createHash('md5').update(password).update(user).digest('hex');
+                    const salted = crypto.createHash('md5').update(upHash).update(buf.slice(off, off+4)).digest('hex');
+                    this.authResponse(Buffer.from(`md5${salted}\0`)); 
+                } else { this.end(); throw(Error(`Authentication method ${authResult} not supported`)); }
                 break;
             case 75: // K -- BackendKeyData
                 this.backendKey = Buffer.from(buf.slice(off, off + length - 4));
@@ -204,31 +189,10 @@ class Client {
                 console.error(cmd, String.fromCharCode(cmd), length, buf.toString('utf8', off, off + length - 4));
         }
     }
-    getRowParser(statement, buf) {
-        const parsed = this._parsedStatements[statement];
-        if (!parsed) {
-            return buf ? new RowParser(buf) : true;
-        }
-        if (!parsed.rowParser) {
-            parsed.rowParser = buf ? new RowParser(buf) : true;
-        }
-        return parsed.rowParser;
-    }
-    getParsedStatement(statement) {
-        let parsed = this._parsedStatements[statement];
-        if (!parsed) {
-            let name = this._parsedStatementCount.toString();
-            this._parsedStatements[statement] = parsed = {name, rowParser: null};
-            this._parsedStatementCount++;
-            this.parse(name, statement);
-            this.describeStatement(name);
-        }
-        return parsed;
-    }
     packetExecutor(resolve, reject) { this._outStreams.push({resolve, reject}); }
     streamExecutor(resolve, reject) {
-        this._outStreams.push({stream: this._tmpStream, statement: this._tmpStatement, resolve, reject}); 
-        this._tmpStatement = null;
+        this._outStreams.push({stream: this._tmpStream, parsed: this._tmpParsed, resolve, reject}); 
+        this._tmpParsed = null;
         this._tmpStream = null;
     }
     streamPromise(stream) {
@@ -305,18 +269,30 @@ class Client {
         this._connection.write(slice(this._wbuf, 0, 5));
         return promise;
     }
+    getParsedStatement(statement) {
+        let parsed = this._parsedStatements[statement];
+        if (!parsed) {
+            let name = this._parsedStatementCount.toString();
+            this._parsedStatements[statement] = parsed = {name, rowParser: null};
+            this._parsedStatementCount++;
+            this.parse(name, statement);
+            this.describeStatement(name);
+        }
+        return parsed;
+    }
     simpleQuery(statement, stream=new ObjectReader()) {
         let off = 5; this._wbuf[0] = 81; // Q -- Query
         off = wstr(this._wbuf, statement, off);
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
+        this._tmpParsed = {name: '', rowParser: null};
         return this.streamPromise(stream);
     }
     query(statement, values=[], stream=new ObjectReader()) {
-        const statementName = this.getParsedStatement(statement).name;
-        this.bind('', statementName, values);
+        const parsed = this.getParsedStatement(statement);
+        this.bind('', parsed.name, values);
         this.execute('');
-        this._tmpStatement = statement;
+        this._tmpParsed = parsed;
         return this.sync(stream);
     }
     copy(statement, values=[], stream=new CopyReader()) {
@@ -328,7 +304,7 @@ class ObjectReader {
     constructor() { this.rows = [], this.completes = []; }
     write(chunk) {
         if (chunk[0] === 68) this.rows.push(this.rowParser.parse(chunk)); // D -- DataRow
-        else if (chunk[0] === 67) this.completes.push(this.rowParser.parseComplete(chunk)); // C -- CommandComplete
+        else if (chunk[0] === 67) this.completes.push(RowParser.parseComplete(chunk)); // C -- CommandComplete
         else if (chunk[0] === 73) this.completes.push({cmd: 'EMPTY', oid: undefined, rowCount: 0}); // I -- EmptyQueryResult
         else if (chunk[0] === 112) this.completes.push({cmd: 'SUSPENDED', oid: undefined, rowCount: 0}); // p -- PortalSuspended
     }
@@ -336,8 +312,8 @@ class ObjectReader {
 class ArrayReader {
     constructor() { this.rows = [], this.completes = []; }
     write(chunk) { 
-        if (chunk[0] === 68) this.rows.push(this.rowParser.parseArray(chunk)); // D -- DataRow 
-        else if (chunk[0] === 67) this.completes.push(this.rowParser.parseComplete(chunk)); // C -- CommandComplete
+        if (chunk[0] === 68) this.rows.push(RowParser.parseArray(chunk)); // D -- DataRow 
+        else if (chunk[0] === 67) this.completes.push(RowParser.parseComplete(chunk)); // C -- CommandComplete
         else if (chunk[0] === 73) this.completes.push({cmd: 'EMPTY', oid: undefined, rowCount: 0}); // I -- EmptyQueryResult
         else if (chunk[0] === 112) this.completes.push({cmd: 'SUSPENDED', oid: undefined, rowCount: 0}); // p -- PortalSuspended
     }
@@ -361,6 +337,7 @@ class CopyReader {
                 break;
             case 99: // CopyDone
                 this.completed = true;
+                break;
         }
     }
 }
@@ -385,26 +362,26 @@ class RowParser {
         this.fieldObj = function() {};
         this.fieldObj.prototype = this.fields.reduce((o,f) => (o[f.name]='', o), {});
     }
-    parseComplete(buf) {
-        const [_, cmd, oid, rowCount] = buf.toString('utf8', 5).match(/^(\S+)( \d+)?( \d+)\u0000/);
-        return {cmd, oid, rowCount: parseInt(rowCount)};
-    }
-    parseField(buf, off, dst, field) {
-        const fieldLength = r32(buf, off); off += 4;
-        if (fieldLength < 0) dst[field] = null;
-        else dst[field] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
-        return off;
-    }
-    parseArray(buf, off=0, dst=[]) {
-        const fieldCount = r16(buf, off+5); off += 7;
-        for (let i = 0; i < fieldCount; i++) off = this.parseField(buf, off, dst, i);
-        return dst;
-    }
     parse(buf, off=0, dst=new this.fieldObj()) {
         const fieldCount = r16(buf, off+5); off += 7;
-        for (let i = 0; i < fieldCount; i++) off = this.parseField(buf, off, dst, this.fields[i].name);
+        for (let i = 0; i < fieldCount; i++) off = RowParser.parseField(buf, off, dst, this.fields[i].name);
         return dst;
     }
+}
+RowParser.parseComplete = function(buf) {
+    const [_, cmd, oid, rowCount] = buf.toString('utf8', 5).match(/^(\S+)( \d+)?( \d+)\u0000/);
+    return {cmd, oid, rowCount: parseInt(rowCount)};
+};
+RowParser.parseField = function(buf, off, dst, field) {
+    const fieldLength = r32(buf, off); off += 4;
+    if (fieldLength < 0) dst[field] = null;
+    else dst[field] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
+    return off;
+}
+RowParser.parseArray = function(buf, off=0, dst=[]) {
+    const fieldCount = r16(buf, off+5); off += 7;
+    for (let i = 0; i < fieldCount; i++) off = RowParser.parseField(buf, off, dst, i);
+    return dst;
 }
 
 module.exports = { Client, ObjectReader, ArrayReader, CopyReader, RowParser };
