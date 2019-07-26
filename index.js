@@ -134,7 +134,6 @@ class Client {
             case 67: // C -- CommandComplete
             case 73: // I -- EmptyQueryResponse
             case 112: // p -- PortalSuspended
-            case 71: // CopyInResponse
             case 72: // CopyOutResponse
             case 87: // CopyBothResponse
             case 99: // CopyDone
@@ -145,6 +144,8 @@ class Client {
             case 50: // 2 -- BindComplete
             case 51: // 3 -- CloseComplete
                 break;
+            case 71: // CopyInResponse
+                if (outStream) outStream.stream.write(buf.slice(0, length+1));
             case 90: // Z -- ReadyForQuery
                 if (outStream) {
                     this._outStreams.shift();
@@ -295,8 +296,14 @@ class Client {
         this._tmpParsed = parsed;
         return this.sync(stream);
     }
-    copy(statement, values=[], stream=new CopyReader()) {
+    copyTo(statement, values, stream=new CopyReader()) {
         return this.query(statement, values, stream);
+    }
+    async copyFrom(statement) {
+        this.parse('', statement);
+        this.bind('', '');
+        this.execute('');
+        return this.streamPromise(new CopyReader());
     }
 }
 

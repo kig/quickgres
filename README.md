@@ -1,15 +1,15 @@
-# Quickgres 0.1.2-rc2
+# Quickgres 0.1.2-rc3
 
 Quickgres is a native-JS PostgreSQL client library.
 
 It's around 400 lines of code, with no external dependencies.
 
 Features
- * Only the query protocol is supported (along with prepared statements and portals).
- * Plaintext & MD5 password authentication.
- * Each parameterized query creates a prepared statement. If you're generating queries on the fly, use simpleQuery instead.
+ * Queries both simple and parameterized (along with prepared statements and portals).
+ * Each parameterized query creates a cached prepared statement and row parser.
+ * COPY protocol for speedy table dumps and inserts.
  * Lightly tested SSL connection support.
- * COPY protocol parser (For rapid table dumps. COPY IN is still untested.)
+ * Plaintext & MD5 password authentication.
 
 Lacking
  * Cursors
@@ -59,12 +59,11 @@ async function go() {
     }
     const results = await Promise.all(promises);
 
-    const copyResult = await client.copy('COPY users TO STDOUT');
+    const copyResult = await client.copyTo('COPY users TO STDOUT');
     console.log(copyResult.rows[0].toString());
 
-    // This may work, needs testing.
-    const copyIn = await client.copy('COPY users_copy FROM STDIN');
-    // Deal with copyIn.{format,columnCount,columnFormats} if needed
+    const copyIn = await client.copyFrom('COPY users_copy FROM STDIN');
+    console.log(copyIn.columnFormats);
     for (let i = 0; i < copyResult.rows.length; i++) {
         client.copyData(copyResult.rows[i]);
     }
