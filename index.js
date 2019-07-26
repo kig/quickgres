@@ -299,7 +299,7 @@ class Client {
     copyTo(statement, values, stream=new CopyReader()) {
         return this.query(statement, values, stream);
     }
-    async copyFrom(statement) {
+    copyFrom(statement) {
         this.parse('', statement);
         this.bind('', '');
         this.execute('');
