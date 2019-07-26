@@ -297,13 +297,16 @@ class Client {
         return this.sync(stream);
     }
     copyTo(statement, values, stream=new CopyReader()) {
-        return this.query(statement, values, stream);
-    }
-    copyFrom(statement) {
         this.parse('', statement);
-        this.bind('', '');
+        this.bind('', '', values);
         this.execute('');
-        return this.streamPromise(new CopyReader());
+        return this.sync(stream);
+    }
+    copyFrom(statement, values, stream=new CopyReader()) {
+        this.parse('', statement);
+        this.bind('', '', values);
+        this.execute('');
+        return this.streamPromise(stream);
     }
 }
 
