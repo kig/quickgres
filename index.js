@@ -101,11 +101,12 @@ class Client {
             } else if (packet.index < 4) {
                 packet.length |= (buf[i] << (8 * (3 - packet.index)));
                 packet.buf[packet.index+1] = buf[i];
-                if (packet.index === 3 && packet.buf.byteLength < packet.length+1)
+                if (packet.index === 3 && packet.buf.byteLength < packet.length+1) 
                     packet.buf = Buffer.allocUnsafe(packet.length+1);  
                 packet.index++;
                 i++;
-            } else {
+            }
+            if (packet.index >= 4) {
                 const slice = buf.slice(i, i + (packet.length - packet.index));
                 slice.copy(packet.buf, packet.index+1);
                 packet.index += slice.byteLength;
@@ -131,9 +132,7 @@ class Client {
                 break;
             case 84: // T -- RowDescription
                 if (outStream) outStream.parsed.rowParser = new RowParser(buf);
-            case 67: // C -- CommandComplete
             case 73: // I -- EmptyQueryResponse
-            case 112: // p -- PortalSuspended
             case 72: // CopyOutResponse
             case 87: // CopyBothResponse
             case 99: // CopyDone
@@ -144,6 +143,13 @@ class Client {
             case 50: // 2 -- BindComplete
             case 51: // 3 -- CloseComplete
                 break;
+            case 67: // C -- CommandComplete
+                if (outStream) {
+                    outStream.stream.write(buf.slice(0, length+1));
+                    outStream.resolve(outStream.stream);
+                }
+                break;
+            case 115: // s -- PortalSuspended
             case 71: // CopyInResponse
                 if (outStream) outStream.stream.write(buf.slice(0, length+1));
             case 90: // Z -- ReadyForQuery
@@ -196,8 +202,9 @@ class Client {
         this._tmpParsed = null;
         this._tmpStream = null;
     }
-    streamPromise(stream) {
+    streamPromise(stream=new ObjectReader(), parsed={name: '', rowParser: null}) {
         this._tmpStream = stream;
+        this._tmpParsed = parsed;
         return new Promise(this.streamExecutor);
     }
     parse(statementName, statement, types=[]) {
@@ -261,14 +268,13 @@ class Client {
         return promise;
     }
     copyDone()   { return this.zeroParamCmd(99); } // c -- CopyDone
-    flush()      { return this.zeroParamCmd(72, new Promise(this.packetExecutor)); } // H -- Flush
-    sync(stream) { return this.zeroParamCmd(83, this.streamPromise(stream)); } // S -- Sync
+    flush()      { return this.zeroParamCmd(72); } // H -- Flush
+    sync()       { return this.zeroParamCmd(83); } // S -- Sync
     terminate()  { return this.zeroParamCmd(88); } // X -- Terminate
-    zeroParamCmd(cmd, promise=undefined) {
-        this._wbuf[0] = cmd; // S -- Sync
+    zeroParamCmd(cmd) {
+        this._wbuf[0] = cmd;
         this._wbuf[1] = this._wbuf[2] = this._wbuf[3] = 0; this._wbuf[4] = 4;
         this._connection.write(slice(this._wbuf, 0, 5));
-        return promise;
     }
     getParsedStatement(statement) {
         let parsed = this._parsedStatements[statement];
@@ -286,21 +292,21 @@ class Client {
         off = wstr(this._wbuf, statement, off);
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
-        this._tmpParsed = {name: '', rowParser: null};
         return this.streamPromise(stream);
     }
     query(statement, values=[], stream=new ObjectReader()) {
         const parsed = this.getParsedStatement(statement);
         this.bind('', parsed.name, values);
         this.execute('');
-        this._tmpParsed = parsed;
-        return this.sync(stream);
+        this.sync();
+        return this.streamPromise(stream, parsed);
     }
     copyTo(statement, values, stream=new CopyReader()) {
         this.parse('', statement);
         this.bind('', '', values);
         this.execute('');
-        return this.sync(stream);
+        this.sync();
+        return this.streamPromise(stream);
     }
     copyFrom(statement, values, stream=new CopyReader()) {
         this.parse('', statement);
@@ -316,7 +322,7 @@ class ObjectReader {
         if (chunk[0] === 68) this.rows.push(this.rowParser.parse(chunk)); // D -- DataRow
         else if (chunk[0] === 67) this.completes.push(RowParser.parseComplete(chunk)); // C -- CommandComplete
         else if (chunk[0] === 73) this.completes.push({cmd: 'EMPTY', oid: undefined, rowCount: 0}); // I -- EmptyQueryResult
-        else if (chunk[0] === 112) this.completes.push({cmd: 'SUSPENDED', oid: undefined, rowCount: 0}); // p -- PortalSuspended
+        else if (chunk[0] === 115) this.completes.push({cmd: 'SUSPENDED', oid: undefined, rowCount: 0}); // s -- PortalSuspended
     }
 }
 class ArrayReader {
@@ -325,7 +331,7 @@ class ArrayReader {
         if (chunk[0] === 68) this.rows.push(RowParser.parseArray(chunk)); // D -- DataRow 
         else if (chunk[0] === 67) this.completes.push(RowParser.parseComplete(chunk)); // C -- CommandComplete
         else if (chunk[0] === 73) this.completes.push({cmd: 'EMPTY', oid: undefined, rowCount: 0}); // I -- EmptyQueryResult
-        else if (chunk[0] === 112) this.completes.push({cmd: 'SUSPENDED', oid: undefined, rowCount: 0}); // p -- PortalSuspended
+        else if (chunk[0] === 115) this.completes.push({cmd: 'SUSPENDED', oid: undefined, rowCount: 0}); // s -- PortalSuspended
     }
 }
 class CopyReader {

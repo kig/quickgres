@@ -1,4 +1,4 @@
-# Quickgres 0.1.3
+# Quickgres 0.1.4-rc0
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -10,11 +10,11 @@ Features
  * COPY protocol for speedy table dumps and inserts.
  * Lightly tested SSL connection support.
  * Plaintext & MD5 password authentication.
+ * Partial query readback in a painful way.
 
 Lacking
- * Cursors
  * SASL authentication
- * Streaming replication (Does anyone want this?)
+ * Streaming replication (For your JavaScript DB synced via WAL shipping)
  * No type parsing (This is more like a feature.)
  * Queries where the statement is larger than 1MB will silently fail (How about bounds checking for scratchpads?)
 
@@ -68,7 +68,8 @@ async function go() {
         client.copyData(copyResult.rows[i]);
     }
     client.copyDone();
-    await client.sync(copyIn);
+    client.sync();
+    await client.streamPromise(copyIn);
 
     await client.end(); // Close the connection socket.
 }

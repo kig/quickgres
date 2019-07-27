@@ -1,4 +1,4 @@
-const { Client, CopyReader, ArrayReader } = require('.');
+const { Client, ObjectReader, ArrayReader } = require('.');
 
 async function go() {
     const client = new Client({ user: process.env.USER, database: process.argv[2] });
@@ -7,9 +7,33 @@ async function go() {
 
     let t0, result, copyResult;
 
+    // Partial queries
+    t0 = Date.now();
+
+    client.parse('', 'SELECT * FROM users');
+    client.describeStatement('');
+    client.bind('', '', []);
+    const parsed = {name: '', rowParser: null};
+
+    result = 0;
+    while (true) {
+        client.execute('', 100);
+        client.flush();
+        const r = await client.streamPromise(new ObjectReader(), parsed);
+        result += r.rows.length;
+        if (r.completes[0].cmd !== 'SUSPENDED') {
+            break;
+        }
+    }
+    client.sync();
+    console.error(1000 * result / (Date.now() - t0), 'partial query (100 rows per execute) rows per second');
+
     const promises = [];
     for (var i = 0; i < 30000; i++) {
-        if (i % 1000 === 0) process.stderr.write(`\rwarming up ${i} / 30000     `);
+        if (i % 1000 === 0) {
+            await Promise.all(promises);
+            process.stderr.write(`\rwarming up ${i} / 30000     `);
+        }
         const id = Math.floor(Math.random() * 1000000).toString();
         promises.push(client.query('SELECT * FROM users WHERE email = $1', [id]));
     }
@@ -82,11 +106,10 @@ async function go() {
 
     t0 = Date.now();
     let copyIn = await client.copyFrom('COPY users_copy FROM STDIN (FORMAT binary)');
-    for (let i = 0; i < copyResult.rows.length; i++) {
-        client.copyData(copyResult.rows[i]);
-    }
+    copyResult.rows.forEach(r => client.copyData(r));
     client.copyDone();
-    await client.sync(copyIn);
+    client.sync();
+    await client.streamPromise();
     console.error(1000 * copyResult.rows.length / (Date.now() - t0), 'binary copyFrom rows per second');
     copyResult = null;
 
