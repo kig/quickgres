@@ -1,4 +1,4 @@
-# Quickgres 0.1.4
+# Quickgres 0.1.5-rc0
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -12,13 +12,13 @@ Features
  * Plaintext & MD5 password authentication.
  * Partial query readback.
  * Handles multiple-statement simple queries.
+ * You should be able to execute 2GB size queries (If you want to store movies in TOAST columns? (Maybe use large objects instead.)) I haven't tried it though, and the write buffer is resized to the largest seen message size so you'll end up using 2GB RAM per connection if you try.
 
 Lacking
  * Full test suite
  * SASL authentication
  * Streaming replication (For your JavaScript DB synced via WAL shipping)
  * No type parsing (This is more like a feature.)
- * Queries where the statement is larger than 1MB will silently fail (How about bounds checking for scratchpads?)
 
 What's it good for? It's relatively small so you can read it. It doesn't have deps, so you don't need to worry about npm dephell. Mostly use it for bed-time reading.
 

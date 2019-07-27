@@ -19,14 +19,27 @@ function w16(buf, v, off) { // Write 16-bit big-endian int
     buf[off++] = v & 0xFF;
     return off;
 }
-function wstr(buf, str, off) { // Write null-terminated string
-    off += buf.write(str, off);
+function wstr(obj, str, off) { // Write null-terminated string
+    let buf = obj._wbuf;
+    const strBuf = Buffer.from(str);
+    if (buf.byteLength < off + strBuf.byteLength + 1) {
+        obj._wbuf = Buffer.allocUnsafe(off + strBuf.byteLength + 1 + 2**20);
+        buf.copy(obj._wbuf);
+        buf = obj._wbuf;
+    }
+    off += strBuf.copy(buf, off);
     buf[off++] = 0;
     return off;
 }
-function wstrLen(buf, str, off) { // Write buffer length, followed by buffer contents
+function wstrLen(obj, str, off) { // Write buffer length, followed by buffer contents
+    let buf = obj._wbuf;
     if (str === null) return w32(buf, -1, off);
     const src = Buffer.from(str);
+    if (buf.byteLength < off + src.byteLength + 1) {
+        obj._wbuf = Buffer.allocUnsafe(off + src.byteLength + 1 + 2**20);
+        buf.copy(obj._wbuf);
+        buf = obj._wbuf;
+    }
     off = w32(buf, src.byteLength, off);
     return off + src.copy(buf, off);
 }
@@ -43,7 +56,7 @@ class Client {
         this._parsedStatementCount = 1;
         this._parsedStatements = {};
         this._packet = { buf: Buffer.alloc(2**16), cmd: 0, len: 0, idx: 0 };
-        this._wbuf = Buffer.alloc(2**16);
+        this._wbuf = Buffer.alloc(2**20);
         this._outStreams = [];
         this.authenticationOk = false;
         this.serverParameters = {};
@@ -84,8 +97,8 @@ class Client {
         const filteredKeys = {password: 1, ssl: 1};
         for (let n in this.config) {
             if (filteredKeys[n]) continue;
-            off = wstr(this._wbuf, n, off); // overflow
-            off = wstr(this._wbuf, this.config[n], off); // overflow
+            off = wstr(this, n, off); // overflow
+            off = wstr(this, this.config[n], off); // overflow
         }
         this._wbuf[off++] = 0;
         w32(this._wbuf, off, 0);
@@ -222,8 +235,8 @@ class Client {
     }
     parse(statementName, statement, types=[]) {
         let off = 5; this._wbuf[0] = 80; // P -- Parse
-        off = wstr(this._wbuf, statementName, off); // overflow
-        off = wstr(this._wbuf, statement, off); // overflow
+        off = wstr(this, statementName, off); // overflow
+        off = wstr(this, statement, off); // overflow
         off = w16(this._wbuf, types.length, off); // max 262144 + 2
         for (let i = 0; i < types.length; i++) off = w32(this._wbuf, types[i], off);
         w32(this._wbuf, off-1, 1);
@@ -231,14 +244,14 @@ class Client {
     }
     bind(portalName, statementName, values=[], valueFormats=[], resultFormats=[]) {
         let off = 5; this._wbuf[0] = 66; // B -- Bind
-        off = wstr(this._wbuf, portalName, off); // overflow
-        off = wstr(this._wbuf, statementName, off); // overflow
+        off = wstr(this, portalName, off); // overflow
+        off = wstr(this, statementName, off); // overflow
         off = w16(this._wbuf, valueFormats.length, off); // max 131072 + 2
         for (let i = 0; i < valueFormats.length; i++) off = w16(this._wbuf, valueFormats[i], off);
         off = w16(this._wbuf, values.length, off);
-        for (let i = 0; i < values.length; i++) { // overflow 65536 * (4 + str)
+        for (let i = 0; i < values.length; i++) { // overflow 262144 + 65536 * str
             if (values[i] === null) off = w32(this._wbuf, -1, off);
-            else off = wstrLen(this._wbuf, values[i], off); // overflow
+            else off = wstrLen(this, values[i], off); // overflow
         }
         off = w16(this._wbuf, resultFormats.length, off); // max 131072 + 2
         for (let i = 0; i < resultFormats.length; i++) off = w16(this._wbuf, resultFormats[i], off);
@@ -247,7 +260,7 @@ class Client {
     }
     execute(portalName, maxRows=0) {
         let off = 5; this._wbuf[0] = 69; // E -- Execute
-        off = wstr(this._wbuf, portalName, off); // overflow
+        off = wstr(this, portalName, off); // overflow
         off = w32(this._wbuf, maxRows, off);
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
@@ -256,7 +269,7 @@ class Client {
         const promise = new Promise(this.packetExecutor);
         let off = 5; this._wbuf[0] = 67; // C -- Close
         this._wbuf[off++] = type;
-        off = wstr(this._wbuf, name, off);  // overflow
+        off = wstr(this, name, off);  // overflow
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
         return promise;
@@ -264,7 +277,7 @@ class Client {
     describe(type, name)  { 
         let off = 5; this._wbuf[0] = 68; // D -- Describe
         this._wbuf[off++] = type;
-        off = wstr(this._wbuf, name, off); // overflow
+        off = wstr(this, name, off); // overflow
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
     }
@@ -313,7 +326,7 @@ class Client {
     }
     simpleQuery(statement, stream=new ObjectReader()) {
         let off = 5; this._wbuf[0] = 81; // Q -- Query
-        off = wstr(this._wbuf, statement, off); // overflow
+        off = wstr(this, statement, off); // overflow
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
         return this.streamPromise(stream, {name: '', rowParser: null});
