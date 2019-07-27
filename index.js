@@ -217,7 +217,7 @@ class Client {
         for (let i = 0; i < valueFormats.length; i++) off = w16(this._wbuf, valueFormats[i], off);
         off = w16(this._wbuf, values.length, off);
         for (let i = 0; i < values.length; i++) {
-            if (values[i] === null) this._wbuf[off++] = -1;
+            if (values[i] === null) off = w32(this._wbuf, -1, off);
             else off = wstrLen(this._wbuf, values[i], off);
         }
         off = w16(this._wbuf, resultFormats.length, off);
@@ -379,8 +379,9 @@ class RowParser {
     }
 }
 RowParser.parseComplete = function(buf) {
-    const [_, cmd, oid, rowCount] = buf.toString('utf8', 5).match(/^(\S+)( \d+)?( \d+)\u0000/);
-    return {cmd, oid, rowCount: parseInt(rowCount)};
+    const str = buf.toString('utf8', 5, 1 + r32(buf, 1));
+    const [_, cmd, oid, rowCount] = str.match(/^(\S+)( \d+)?( \d+)\u0000/) || str.match(/^(\S+)\u0000/);
+    return {cmd, oid, rowCount: parseInt(rowCount || 0)};
 };
 RowParser.parseField = function(buf, off, dst, field) {
     const fieldLength = r32(buf, off); off += 4;
