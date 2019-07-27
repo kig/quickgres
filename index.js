@@ -42,8 +42,8 @@ class Client {
         assert(config.database, "No 'database' defined in config");
         this._parsedStatementCount = 1;
         this._parsedStatements = {};
-        this._packet = { buf: Buffer.alloc(2**20), cmd: 0, len: 0, idx: 0 };
-        this._wbuf = Buffer.alloc(2**20);
+        this._packet = { buf: Buffer.alloc(2**16), cmd: 0, len: 0, idx: 0 };
+        this._wbuf = Buffer.alloc(2**16);
         this._outStreams = [];
         this.authenticationOk = false;
         this.serverParameters = {};
@@ -84,8 +84,8 @@ class Client {
         const filteredKeys = {password: 1, ssl: 1};
         for (let n in this.config) {
             if (filteredKeys[n]) continue;
-            off = wstr(this._wbuf, n, off);
-            off = wstr(this._wbuf, this.config[n], off);
+            off = wstr(this._wbuf, n, off); // overflow
+            off = wstr(this._wbuf, this.config[n], off); // overflow
         }
         this._wbuf[off++] = 0;
         w32(this._wbuf, off, 0);
@@ -222,32 +222,32 @@ class Client {
     }
     parse(statementName, statement, types=[]) {
         let off = 5; this._wbuf[0] = 80; // P -- Parse
-        off = wstr(this._wbuf, statementName, off);
-        off = wstr(this._wbuf, statement, off);
-        off = w16(this._wbuf, types.length, off);
+        off = wstr(this._wbuf, statementName, off); // overflow
+        off = wstr(this._wbuf, statement, off); // overflow
+        off = w16(this._wbuf, types.length, off); // max 262144 + 2
         for (let i = 0; i < types.length; i++) off = w32(this._wbuf, types[i], off);
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
     }
     bind(portalName, statementName, values=[], valueFormats=[], resultFormats=[]) {
         let off = 5; this._wbuf[0] = 66; // B -- Bind
-        off = wstr(this._wbuf, portalName, off);
-        off = wstr(this._wbuf, statementName, off);
-        off = w16(this._wbuf, valueFormats.length, off);
+        off = wstr(this._wbuf, portalName, off); // overflow
+        off = wstr(this._wbuf, statementName, off); // overflow
+        off = w16(this._wbuf, valueFormats.length, off); // max 131072 + 2
         for (let i = 0; i < valueFormats.length; i++) off = w16(this._wbuf, valueFormats[i], off);
         off = w16(this._wbuf, values.length, off);
-        for (let i = 0; i < values.length; i++) {
+        for (let i = 0; i < values.length; i++) { // overflow 65536 * (4 + str)
             if (values[i] === null) off = w32(this._wbuf, -1, off);
-            else off = wstrLen(this._wbuf, values[i], off);
+            else off = wstrLen(this._wbuf, values[i], off); // overflow
         }
-        off = w16(this._wbuf, resultFormats.length, off);
+        off = w16(this._wbuf, resultFormats.length, off); // max 131072 + 2
         for (let i = 0; i < resultFormats.length; i++) off = w16(this._wbuf, resultFormats[i], off);
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
     }
     execute(portalName, maxRows=0) {
         let off = 5; this._wbuf[0] = 69; // E -- Execute
-        off = wstr(this._wbuf, portalName, off);
+        off = wstr(this._wbuf, portalName, off); // overflow
         off = w32(this._wbuf, maxRows, off);
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
@@ -256,7 +256,7 @@ class Client {
         const promise = new Promise(this.packetExecutor);
         let off = 5; this._wbuf[0] = 67; // C -- Close
         this._wbuf[off++] = type;
-        off = wstr(this._wbuf, name, off);
+        off = wstr(this._wbuf, name, off);  // overflow
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
         return promise;
@@ -264,7 +264,7 @@ class Client {
     describe(type, name)  { 
         let off = 5; this._wbuf[0] = 68; // D -- Describe
         this._wbuf[off++] = type;
-        off = wstr(this._wbuf, name, off);
+        off = wstr(this._wbuf, name, off); // overflow
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
     }
@@ -313,7 +313,7 @@ class Client {
     }
     simpleQuery(statement, stream=new ObjectReader()) {
         let off = 5; this._wbuf[0] = 81; // Q -- Query
-        off = wstr(this._wbuf, statement, off);
+        off = wstr(this._wbuf, statement, off); // overflow
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
         return this.streamPromise(stream, {name: '', rowParser: null});
