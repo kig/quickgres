@@ -7,6 +7,9 @@ async function go() {
 
     let t0, result, copyResult;
 
+    result = await client.simpleQuery("SELECT * FROM users LIMIT 1; INSERT INTO users_copy (name) VALUES ('Ilmarillion Heikevatar'); SELECT * FROM users_copy LIMIT 1;");
+    console.error(`Triple query resulted into ${result.rows.length} rows`);
+
     // Partial queries
     t0 = Date.now();
 
@@ -109,12 +112,16 @@ async function go() {
     copyResult.rows.forEach(r => client.copyData(r));
     client.copyDone();
     client.sync();
-    await client.streamPromise();
+    await client.streamPromise(copyIn);
     console.error(1000 * copyResult.rows.length / (Date.now() - t0), 'binary copyFrom rows per second');
     copyResult = null;
 
     console.error('\ndone');
     await client.end();
+
+    console.error("Testing SSL connection");
+    require('./test-ssl');
 }
 
 go();
+

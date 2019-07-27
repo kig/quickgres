@@ -1,4 +1,4 @@
-# Quickgres 0.1.4-rc0
+# Quickgres 0.1.4-rc1
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -11,6 +11,7 @@ Features
  * Lightly tested SSL connection support.
  * Plaintext & MD5 password authentication.
  * Partial query readback in a painful way.
+ * Handles multiple-statement simple queries.
 
 Lacking
  * SASL authentication

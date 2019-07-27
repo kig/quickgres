@@ -38,6 +38,8 @@ function slice(buf, start, end) { // Copying slice, used to work around full soc
 
 class Client {
     constructor(config) {
+        assert(config.user, "No 'user' defined in config");
+        assert(config.database, "No 'database' defined in config");
         this._parsedStatementCount = 1;
         this._parsedStatements = {};
         this._packet = { buf: Buffer.alloc(1e6), cmd: 0, len: 0, idx: 0 };
@@ -180,7 +182,7 @@ class Client {
                     this.authResponse(Buffer.from(this.config.password + '\0')); 
                 } else if (authResult === 5) { // 5 -- AuthenticationMD5Password
                     assert(this.config.password !== undefined, "No password supplied");
-                    const upHash = crypto.createHash('md5').update(password).update(user).digest('hex');
+                    const upHash = crypto.createHash('md5').update(this.config.password).update(this.config.user).digest('hex');
                     const salted = crypto.createHash('md5').update(upHash).update(buf.slice(off, off+4)).digest('hex');
                     this.authResponse(Buffer.from(`md5${salted}\0`)); 
                 } else { this.end(); throw(Error(`Authentication method ${authResult} not supported`)); }
