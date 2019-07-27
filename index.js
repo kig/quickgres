@@ -42,8 +42,8 @@ class Client {
         assert(config.database, "No 'database' defined in config");
         this._parsedStatementCount = 1;
         this._parsedStatements = {};
-        this._packet = { buf: Buffer.alloc(1e6), cmd: 0, len: 0, idx: 0 };
-        this._wbuf = Buffer.alloc(1e6);
+        this._packet = { buf: Buffer.alloc(2**20), cmd: 0, len: 0, idx: 0 };
+        this._wbuf = Buffer.alloc(2**20);
         this._outStreams = [];
         this.authenticationOk = false;
         this.serverParameters = {};
@@ -95,18 +95,20 @@ class Client {
         const packet = this._packet;
         for (var i = 0; i < buf.byteLength;) {
             if (packet.cmd === 0) {
-                packet.cmd = buf[i];
+                packet.cmd = buf[i++];
                 packet.buf[0] = packet.cmd;
                 packet.length = 0;
                 packet.index = 0;
-                i++;
             } else if (packet.index < 4) {
-                packet.length |= (buf[i] << (8 * (3 - packet.index)));
-                packet.buf[packet.index+1] = buf[i];
-                if (packet.index === 3 && packet.buf.byteLength < packet.length+1) 
-                    packet.buf = Buffer.allocUnsafe(packet.length+1);  
-                packet.index++;
-                i++;
+                packet.buf[++packet.index] = buf[i++];
+                if (packet.index === 4) {
+                    packet.length = r32(packet.buf, 1);
+                    if (packet.buf.byteLength < packet.length+1) {
+                        const newBuf = Buffer.allocUnsafe(packet.length+1);
+                        packet.buf.copy(newBuf, 0, 0, 5);
+                        packet.buf = newBuf;
+                    }
+                }
             }
             if (packet.index >= 4) {
                 const slice = buf.slice(i, i + (packet.length - packet.index));
