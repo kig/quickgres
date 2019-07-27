@@ -62,7 +62,7 @@ async function go() {
     // Partial query results
     client.startQuery('SELECT * FROM users', []);
     while (client.inQuery) {
-        const resultChunk = await client.getResults(100));
+        const resultChunk = await client.getResults(100);
         // To stop receiving chunks, send a sync.
         if (resultChunk.rows.length > 1) {
             client.sync();
