@@ -146,15 +146,24 @@ class Client {
             case 51: // 3 -- CloseComplete
                 break;
             case 67: // C -- CommandComplete
+                if (this.inQuery) {
+                    this.inQuery = false;
+                    this.sync();
+                }
                 if (outStream) {
                     outStream.stream.write(buf.slice(0, length+1));
-                    outStream.resolve(outStream.stream);
                 }
                 break;
             case 115: // s -- PortalSuspended
             case 71: // CopyInResponse
-                if (outStream) outStream.stream.write(buf.slice(0, length+1));
+                if (outStream) {
+                    outStream.stream.write(buf.slice(0, length+1));
+                    this._outStreams.shift();
+                    outStream.resolve(outStream.stream);
+                }
+                break;
             case 90: // Z -- ReadyForQuery
+                this.inQuery = this.inQueryParsed = null;
                 if (outStream) {
                     this._outStreams.shift();
                     outStream.resolve(outStream.stream);
@@ -289,12 +298,23 @@ class Client {
         }
         return parsed;
     }
+    startQuery(statement, values=[]) {
+        const parsed = this.getParsedStatement(statement);
+        this.bind('', parsed.name, values);
+        this.inQuery = true;
+        this.inQueryParsed = parsed;
+    }
+    getResults(maxCount=0, stream=new ObjectReader()) {
+        this.execute('', maxCount);
+        this.flush();
+        return this.streamPromise(stream, this.inQueryParsed);
+    }
     simpleQuery(statement, stream=new ObjectReader()) {
         let off = 5; this._wbuf[0] = 81; // Q -- Query
         off = wstr(this._wbuf, statement, off);
         w32(this._wbuf, off-1, 1);
         this._connection.write(slice(this._wbuf, 0, off));
-        return this.streamPromise(stream);
+        return this.streamPromise(stream, {name: '', rowParser: null});
     }
     query(statement, values=[], stream=new ObjectReader()) {
         const parsed = this.getParsedStatement(statement);
@@ -308,13 +328,13 @@ class Client {
         this.bind('', '', values);
         this.execute('');
         this.sync();
-        return this.streamPromise(stream);
+        return this.streamPromise(stream, {name: '', rowParser: null});
     }
     copyFrom(statement, values, stream=new CopyReader()) {
         this.parse('', statement);
         this.bind('', '', values);
         this.execute('');
-        return this.streamPromise(stream);
+        return this.streamPromise(stream, {name: '', rowParser: null});
     }
 }
 
