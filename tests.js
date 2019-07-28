@@ -1,62 +1,53 @@
-const { Client, ObjectReader, ArrayReader, CopyReader } = require('.');
+const { Client, ObjectReader, ArrayReader, RawReader, CopyReader } = require('.');
 const assert = require('assert');
 
 async function testProtocolState(client) {
     let result = await client.query('SELECT * FROM users LIMIT 10');
     assert(result.rows.length === 10, `SELECT 1 got ${result.rows.length} users but wanted 10`);
-    assert(result.completes.length === 1, 'SELECT 1 got wrong number of completes' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].rowCount === 10, 'SELECT 1 has wrong rowCount' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].cmd === 'SELECT', 'SELECT 1 has wrong cmd' + ` ${JSON.stringify(result.completes)}`)
+    assert(result.rowCount === 10, 'SELECT 1 has wrong rowCount' + ` ${JSON.stringify(result)}`);
+    assert(result.cmd === 'SELECT', 'SELECT 1 has wrong cmd' + ` ${JSON.stringify(result)}`)
 
     result = await client.query('CREATE TABLE IF NOT EXISTS users_test (name text, email text, password text)');
     assert(result.rows.length === 0, 'CREATE TABLE got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
-    assert(result.completes.length === 1, 'CREATE TABLE got wrong number of completes' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].cmd === 'CREATE TABLE', 'CREATE TABLE has wrong cmd' + ` ${JSON.stringify(result.completes)}`)
+    assert(result.cmd === 'CREATE TABLE', 'CREATE TABLE has wrong cmd' + ` ${JSON.stringify(result)}`)
 
     result = await client.query('DELETE FROM users_test WHERE password = $1', ['baz']);
     assert(result.rows.length === 0, 'DELETE got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
-    assert(result.completes.length === 1, 'DELETE got wrong number of completes' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].cmd === 'DELETE', 'DELETE has wrong cmd' + ` ${JSON.stringify(result.completes)}`)
+    assert(result.cmd === 'DELETE', 'DELETE has wrong cmd' + ` ${JSON.stringify(result)}`)
 
     result = await client.query('INSERT INTO users_test (name, email, password) VALUES ($1, $2, $3) RETURNING password', ['foo', 'bar', 'baz']);
     assert(result.rows.length === 1, 'INSERT got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
     assert(result.rows[0].password === 'baz', 'INSERT did not return password' + ` ${JSON.stringify(result.rows)}`);
-    assert(result.completes.length === 1, 'INSERT got wrong number of completes' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].rowCount === 1, 'INSERT has wrong rowCount' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].cmd === 'INSERT', 'INSERT has wrong cmd' + ` ${JSON.stringify(result.completes)}`)
+    assert(result.rowCount === 1, 'INSERT has wrong rowCount' + ` ${JSON.stringify(result)}`);
+    assert(result.cmd === 'INSERT', 'INSERT has wrong cmd' + ` ${JSON.stringify(result)}`)
 
     result = await client.query('SELECT name, email, password FROM users_test WHERE password = $1', ['baz']);
     assert(result.rows.length === 1, 'SELECT 2 got wrong number of rows') + ` ${JSON.stringify(result.rows)}`;
     assert(result.rows[0].name === 'foo', 'SELECT 2 did not get right name' + ` ${JSON.stringify(result.rows)}`);
     assert(result.rows[0].email === 'bar', 'SELECT 2 did not get right email' + ` ${JSON.stringify(result.rows)}`);
-    assert(result.completes.length === 1, 'SELECT 2 got wrong number of completes' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].rowCount === 1, 'SELECT 2 has wrong rowCount' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].cmd === 'SELECT', 'SELECT 2 has wrong cmd' + ` ${JSON.stringify(result.completes)}`)
+    assert(result.rowCount === 1, 'SELECT 2 has wrong rowCount' + ` ${JSON.stringify(result)}`);
+    assert(result.cmd === 'SELECT', 'SELECT 2 has wrong cmd' + ` ${JSON.stringify(result)}`)
 
     result = await client.query('INSERT INTO users_test (name, email, password) VALUES ($1, $2, $3)', ['fox', 'bax', 'baz']);
     assert(result.rows.length === 0, 'INSERT 2 got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
-    assert(result.completes.length === 1, 'INSERT 2 got wrong number of completes' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].rowCount === 1, 'INSERT 2 has wrong rowCount' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].cmd === 'INSERT', 'INSERT 2 has wrong cmd' + ` ${JSON.stringify(result.completes)}`)
+    assert(result.rowCount === 1, 'INSERT 2 has wrong rowCount' + ` ${JSON.stringify(result)}`);
+    assert(result.cmd === 'INSERT', 'INSERT 2 has wrong cmd' + ` ${JSON.stringify(result)}`)
 
     result = await client.query('UPDATE users_test SET name = $1 WHERE password = $2', ['qux', 'baz']);
     assert(result.rows.length === 0, 'UPDATE got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
-    assert(result.completes.length === 1, 'UPDATE got wrong number of completes' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].rowCount === 2, 'UPDATE has wrong rowCount' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].cmd === 'UPDATE', 'UPDATE has wrong cmd' + ` ${JSON.stringify(result.completes)}`)
+    assert(result.rowCount === 2, 'UPDATE has wrong rowCount' + ` ${JSON.stringify(result)}`);
+    assert(result.cmd === 'UPDATE', 'UPDATE has wrong cmd' + ` ${JSON.stringify(result)}`)
 
     result = await client.query('SELECT name, email, password FROM users_test WHERE password = $1', ['baz']);
     assert(result.rows.length === 2, 'SELECT 3 got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
     assert(result.rows.every(r => r.password === 'baz' && r.name === 'qux'), 'SELECT 3 rows have wrong password or name' + ` ${JSON.stringify(result.rows)}`)
-    assert(result.completes.length === 1, 'SELECT 3 got wrong number of completes' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].rowCount === 2, 'SELECT 3 has wrong rowCount' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].cmd === 'SELECT', 'SELECT 3 has wrong cmd' + ` ${JSON.stringify(result.completes)}`)
+    assert(result.rowCount === 2, 'SELECT 3 has wrong rowCount' + ` ${JSON.stringify(result)}`);
+    assert(result.cmd === 'SELECT', 'SELECT 3 has wrong cmd' + ` ${JSON.stringify(result)}`)
 
     result = await client.query('DELETE FROM users_test WHERE password = $1', ['baz']);
     assert(result.rows.length === 0, 'DELETE 2 got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
-    assert(result.completes.length === 1, 'DELETE 2 got wrong number of completes' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].rowCount === 2, 'DELETE 2 has wrong rowCount' + ` ${JSON.stringify(result.completes)}`);
-    assert(result.completes[0].cmd === 'DELETE', 'DELETE 2 has wrong cmd' + ` ${JSON.stringify(result.completes)}`)
+    assert(result.rowCount === 2, 'DELETE 2 has wrong rowCount' + ` ${JSON.stringify(result)}`);
+    assert(result.cmd === 'DELETE', 'DELETE 2 has wrong cmd' + ` ${JSON.stringify(result)}`)
 
 }
 
@@ -75,6 +66,7 @@ module.exports = async function runTest(client) {
     }
     console.error(`received ${result} rows`);
     console.error(1000 * result / (Date.now() - t0), 'partial query (100 rows per execute) rows per second');
+    result = null;
 
     await testProtocolState(client);
     t0 = Date.now();
@@ -89,6 +81,7 @@ module.exports = async function runTest(client) {
     }
     console.error(`received ${result} rows`);
     console.error(1000 * result / (Date.now() - t0), 'partial query (early exit) rows per second');
+    result = null;
 
     await testProtocolState(client);
     for (var i = 0; i < 30000; i++) {
@@ -111,16 +104,30 @@ module.exports = async function runTest(client) {
     result = await Promise.all(promises);
     console.error(1000 * result.length / (Date.now() - t0), 'random queries per second');
     promises.splice(0);
+    result = null;
+
+    await testProtocolState(client);
+    t0 = Date.now();
+    result = await client.query('SELECT * FROM users', []);
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'query rows per second');
+    result = null;
 
     await testProtocolState(client);
     t0 = Date.now();
     result = await client.query('SELECT * FROM users', [], new ArrayReader());
-    console.error(1000 * result.rows.length / (Date.now() - t0), 'query rows per second');
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'query array rows per second');
     copyResult = result;
+    result = null;
+
+    await testProtocolState(client);
+    t0 = Date.now();
+    result = await client.query('SELECT * FROM users', [], new RawReader());
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'query raw rows per second');
+    result = null;
 
     await testProtocolState(client);
     result = await client.query('DELETE FROM users_copy');
-    console.error(`Deleted ${result.completes[0].rowCount} rows from users_copy`);
+    console.error(`Deleted ${result.rowCount} rows from users_copy`);
 
     await testProtocolState(client);
     t0 = Date.now();
@@ -168,7 +175,7 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     result = await client.query('DELETE FROM users_copy');
-    console.error(`Deleted ${result.completes[0].rowCount} rows from users_copy`);
+    console.error(`Deleted ${result.rowCount} rows from users_copy`);
 
     await testProtocolState(client);
     t0 = Date.now();
