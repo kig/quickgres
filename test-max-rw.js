@@ -1,6 +1,6 @@
 const cluster = require('cluster');
 const numCPUs = require('os').cpus().length / 2;
-const { Client } = require('.');
+const { Client, ArrayReader } = require('.');
 
 if (cluster.isMaster) {
     for (let i = 0; i < numCPUs; i++) cluster.fork();
@@ -15,8 +15,8 @@ if (cluster.isMaster) {
 } else {
     const jsonChunk = '{"_id":"5d3c67b00fef75d268fc15b3","index":0,"guid":"92168a32-1161-41df-bc5a-9405237bd33a","isActive":true,"balance":"$2,385.44"}';
     async function sessionRW(client, id) {
-        const {rows: [user]} = await client.query('SELECT u.id, u.data FROM sessions_copy s, users_copy2 u WHERE s.id = $1 AND s.deleted = FALSE AND s.owner = u.id', [id]);
-        return client.query('UPDATE users_copy2 SET data = $1 WHERE id = $2', [jsonChunk, user.id]);
+        const {rows: [user]} = await client.query('SELECT u.id, u.data FROM sessions_copy s, users_copy2 u WHERE s.id = $1 AND s.deleted = FALSE AND s.owner = u.id', [id], new ArrayReader());
+        return client.query('UPDATE users_copy2 SET data = $1 WHERE id = $2', [jsonChunk, user[0]]);
     }
 
     async function go() {
