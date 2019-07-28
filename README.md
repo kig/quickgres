@@ -1,4 +1,4 @@
-# Quickgres 0.2.1-rc0
+# Quickgres 0.2.1
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -87,6 +87,8 @@ go();
 ```
 
 ## Changelog
+
+ * 0.2.1: Allocate exact size message write buffers (yay), removed `describe` methods, more tests, inlined row parsers, added RawReader, minor optimizations, cut lines to 365 from 441.
 
  * 0.2.0: Deprecated `simpleQuery`, merged `copyTo` and `copyFrom` to `copy`, optimized number of socket writes on hot path (this improved SSL perf a bit), added more tests to tests.js, changed `sync()` and `copyDone()` to async methods to simplify API.
 
