@@ -60,14 +60,13 @@ class Client {
         this._outStreams = [];
         this.authenticationOk = false;
         this.serverParameters = {};
-        this.packetExecutor = this.packetExecutor.bind(this);
         this.streamExecutor = this.streamExecutor.bind(this);
         this.config = config;
     }
     connect(address, host) {
         this._connection = net.createConnection(address, host);
         this._connection.once('connect', this.onInitialConnect.bind(this));
-        return new Promise(this.packetExecutor);
+        return this.streamPromise();
     }
     end() { 
         this.terminate();
@@ -129,31 +128,29 @@ class Client {
                 packet.index += slice.byteLength;
                 i += slice.byteLength;
                 if (packet.index === packet.length) {
-                    this.processPacket(packet);
+                    this.processPacket(packet, 5, this._outStreams[0]);
                     packet.cmd = 0;
                 }
             }
         }
     }
-    processPacket(packet, off=5, outStream=this._outStreams[0]) {
+    processPacket(packet, off, outStream) {
         const { buf, cmd, length } = packet;
         switch (cmd) {
             case 68: // D -- DataRow
-                if (outStream) {
-                    outStream.stream.rowParser = outStream.parsed.rowParser;
-                    outStream.stream.write(buf.slice(0, length+1));
-                }
+                outStream.stream.rowParser = outStream.parsed.rowParser;
+                outStream.stream.write(buf.slice(0, length+1));
                 break;
             case 100: // CopyData
-                if (outStream) outStream.stream.write(buf.slice(0, length+1));
+                outStream.stream.write(buf.slice(0, length+1));
                 break;
             case 84: // T -- RowDescription
-                if (outStream) outStream.parsed.rowParser = new RowParser(buf);
+                outStream.parsed.rowParser = new RowParser(buf);
             case 73: // I -- EmptyQueryResponse
             case 72: // CopyOutResponse
             case 87: // CopyBothResponse
             case 99: // CopyDone
-                if (outStream) outStream.stream.write(buf.slice(0, length+1));
+                outStream.stream.write(buf.slice(0, length+1));
             case 110: // NoData
             case 116: // ParameterDescription
             case 49: // 1 -- ParseComplete
@@ -161,37 +158,26 @@ class Client {
             case 51: // 3 -- CloseComplete
                 break;
             case 67: // C -- CommandComplete
-                if (this.inQuery) {
-                    this.inQuery = false;
-                    this.sync();
-                }
-                if (outStream) {
-                    outStream.stream.write(buf.slice(0, length+1));
-                }
+                if (this.inQuery) this._sync();
+                outStream.stream.write(buf.slice(0, length+1));
                 break;
             case 115: // s -- PortalSuspended
             case 71: // CopyInResponse
-                if (outStream) {
-                    outStream.stream.write(buf.slice(0, length+1));
-                    this._outStreams.shift();
-                    outStream.resolve(outStream.stream);
-                }
+                outStream.stream.write(buf.slice(0, length+1));
+                this._outStreams.shift();
+                outStream.resolve(outStream.stream);
                 break;
             case 90: // Z -- ReadyForQuery
                 this.inQuery = this.inQueryParsed = null;
-                if (outStream) {
-                    this._outStreams.shift();
-                    outStream.resolve(outStream.stream);
-                }
+                this._outStreams.shift();
+                if (outStream) outStream.resolve(outStream.stream);
                 break;
             case 69: // E -- Error
                 const fieldType = buf[off]; ++off;
                 const string = buf.toString('utf8', off, off + length - 5);
                 console.error(cmd, String.fromCharCode(cmd), length, fieldType, string);
-                if (outStream) {
-                    this._outStreams.shift();
-                    outStream.reject(Error(string));
-                }
+                this._outStreams.shift();
+                if (outStream) outStream.reject(Error(string));
                 break;
             case 83: // S -- ParameterStatus
                 const kv = buf.toString('utf8', off, off + length - 5)
@@ -211,18 +197,24 @@ class Client {
                     this.authResponse(Buffer.from(`md5${salted}\0`)); 
                 } else { this.end(); throw(Error(`Authentication method ${authResult} not supported`)); }
                 break;
+            case 78: // NoticeResponse
+                if (this.onNotice) this.onNotice(buf);
+                break;
+            case 65: // NotificationResponse
+                if (this.onNotification) this.onNotification(buf);
+                break;
             case 75: // K -- BackendKeyData
                 this.backendKey = Buffer.from(buf.slice(off, off + length - 4));
                 break;
             case 118: // NegotiateProtocolVersion
-            case 78: // NoticeResponse
-            case 65: // NotificationResponse
+                this.end(); throw(Error('NegotiateProtocolVersion not implemented'));
             case 86: // FunctionCallResponse -- Legacy, not supported.
+                this.end(); throw(Error('FunctionCallResponse not implemented'));
             default:
                 console.error(cmd, String.fromCharCode(cmd), length, buf.toString('utf8', off, off + length - 4));
+                this.end(); throw(Error('Unknown message. Protocol state unknown, exiting.'));
         }
     }
-    packetExecutor(resolve, reject) { this._outStreams.push({resolve, reject}); }
     streamExecutor(resolve, reject) {
         this._outStreams.push({stream: this._tmpStream, parsed: this._tmpParsed, resolve, reject}); 
         this._tmpParsed = null;
@@ -259,50 +251,80 @@ class Client {
         this._connection.write(slice(this._wbuf, 0, off));
     }
     execute(portalName, maxRows=0) {
-        let off = 5; this._wbuf[0] = 69; // E -- Execute
-        off = wstr(this, portalName, off); // overflow
-        off = w32(this._wbuf, maxRows, off);
-        w32(this._wbuf, off-1, 1);
-        this._connection.write(slice(this._wbuf, 0, off));
+        const nameBuf = Buffer.from(portalName + '\0');
+        const msg = Buffer.allocUnsafe(9 + nameBuf.byteLength);
+        msg[0] = 69; // E -- Execute
+        w32(msg, nameBuf.byteLength + 8, 1);
+        nameBuf.copy(msg, 5);
+        w32(msg, maxRows, 5 + nameBuf.byteLength);
+        this._connection.write(msg);
     }
-    close(type, name) {
-        const promise = new Promise(this.packetExecutor);
-        let off = 5; this._wbuf[0] = 67; // C -- Close
-        this._wbuf[off++] = type;
-        off = wstr(this, name, off);  // overflow
-        w32(this._wbuf, off-1, 1);
-        this._connection.write(slice(this._wbuf, 0, off));
-        return promise;
+    bindExecuteSync(portalName, statementName, maxRows=0, values=[], valueFormats=[], resultFormats=[]) {
+        let off = 5; this._wbuf[0] = 66; // B -- Bind
+        const nameBuf = Buffer.from(portalName + '\0');
+        off += nameBuf.copy(this._wbuf, off); // overflow
+        off = wstr(this, statementName, off); // overflow
+        off = w16(this._wbuf, valueFormats.length, off); // max 131072 + 2
+        for (let i = 0; i < valueFormats.length; i++) off = w16(this._wbuf, valueFormats[i], off);
+        off = w16(this._wbuf, values.length, off);
+        for (let i = 0; i < values.length; i++) { // overflow 262144 + 65536 * str
+            if (values[i] === null) off = w32(this._wbuf, -1, off);
+            else off = wstrLen(this, values[i], off); // overflow
+        }
+        off = w16(this._wbuf, resultFormats.length, off); // max 131072 + 2
+        for (let i = 0; i < resultFormats.length; i++) off = w16(this._wbuf, resultFormats[i], off);
+        w32(this._wbuf, off-1, 1); // End of Bind
+        this._wbuf[off++] = 69; // E -- Execute
+        off = w32(this._wbuf, nameBuf.byteLength + 8, off);
+        off += nameBuf.copy(this._wbuf, off);
+        off = w32(this._wbuf, maxRows, off); // End of Execute
+        this._wbuf[off] = 83; this._wbuf[++off] = 0; this._wbuf[++off] = 0; this._wbuf[++off] = 0; this._wbuf[++off] = 4; // S -- Sync
+        this._connection.write(slice(this._wbuf, 0, off+1));
     }
-    describe(type, name)  { 
-        let off = 5; this._wbuf[0] = 68; // D -- Describe
-        this._wbuf[off++] = type;
-        off = wstr(this, name, off); // overflow
-        w32(this._wbuf, off-1, 1);
-        this._connection.write(slice(this._wbuf, 0, off));
+    executeFlush(portalName, maxRows) {
+        const nameBuf = Buffer.from(portalName + '\0');
+        const msg = Buffer.allocUnsafe(14 + nameBuf.byteLength);
+        msg[0] = 69; // E -- Execute
+        w32(msg, nameBuf.byteLength + 8, 1);
+        nameBuf.copy(msg, 5);
+        let off = 5 + nameBuf.byteLength;
+        off = w32(msg, maxRows, off);
+        msg[off] = 72; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // H -- Flush
+        this._connection.write(msg);
     }
-    describeStatement(name) { return this.describe(83, name); } // S -- Statement
-    describePortal(name) { return this.describe(80, name); } // P -- Portal
+    close(type, name) { return this.bufferCmd(67, Buffer.from(type + name + '\0')); } // C -- Close
+    describeStatement(name) { return this.bufferCmd(68, Buffer.from('S' + name + '\0')); } // D -- Describe, S -- Statement
+    describePortal(name) { return this.bufferCmd(68, Buffer.from('P' + name + '\0')); } // D -- Describe, P -- Portal
     authResponse(buffer) { return this.bufferCmd(112, buffer); } // p -- PasswordMessage/GSSResponse/SASLInitialResponse/SASLResponse
     copyData(buffer) { return this.bufferCmd(100, buffer); } // d -- CopyData
     copyFail(buffer) { return this.bufferCmd(102, buffer); } // f -- CopyFail
-    bufferCmd(cmd, buffer, promise) {
-        this._wbuf[0] = cmd;
-        w32(this._wbuf, 4 + buffer.byteLength, 1);
-        this._connection.write(slice(this._wbuf, 0, 5));
-        this._connection.write(buffer);
-        return promise;
+    bufferCmd(cmd, buffer) {
+        const msg = Buffer.allocUnsafe(5 + buffer.byteLength);
+        msg[0] = cmd;
+        w32(msg, 4 + buffer.byteLength, 1);
+        buffer.copy(msg, 5);
+        this._connection.write(msg);
     }
-    copyDone()   { return this.zeroParamCmd(99); } // c -- CopyDone
+    copyDone(stream=new CopyReader()) {
+        const msg = Buffer.allocUnsafe(10);
+        msg[0] = 99; msg[1] = 0; msg[2] = 0; msg[3] = 0; msg[4] = 4; // c -- CopyDone
+        msg[5] = 83; msg[6] = 0; msg[7] = 0; msg[8] = 0; msg[9] = 4; // S -- Sync
+        this._connection.write(msg);
+        return this.streamPromise(stream);
+    } 
+    _sync() { this.zeroParamCmd(83); } // S -- Sync
+    sync(stream=new ObjectReader()) {
+        this.zeroParamCmd(83); // S -- Sync
+        return this.streamPromise(stream);
+    }
     flush()      { return this.zeroParamCmd(72); } // H -- Flush
-    sync()       { return this.zeroParamCmd(83); } // S -- Sync
     terminate()  { return this.zeroParamCmd(88); } // X -- Terminate
     zeroParamCmd(cmd) {
-        this._wbuf[0] = cmd;
-        this._wbuf[1] = this._wbuf[2] = this._wbuf[3] = 0; this._wbuf[4] = 4;
-        this._connection.write(slice(this._wbuf, 0, 5));
+        const msg = Buffer.allocUnsafe(5);
+        msg[0] = cmd; msg[1] = 0; msg[2] = 0; msg[3] = 0; msg[4] = 4;
+        this._connection.write(msg);
     }
-    getParsedStatement(statement) {
+    parseStatement(statement, values) {
         let parsed = this._parsedStatements[statement];
         if (!parsed) {
             let name = this._parsedStatementCount.toString();
@@ -313,44 +335,22 @@ class Client {
         }
         return parsed;
     }
+
     startQuery(statement, values=[]) {
-        const parsed = this.getParsedStatement(statement);
-        this.bind('', parsed.name, values);
+        this.inQueryParsed = this.parseStatement(statement);
+        this.bind('', this.inQueryParsed.name, values);
         this.inQuery = true;
-        this.inQueryParsed = parsed;
     }
     getResults(maxCount=0, stream=new ObjectReader()) {
-        this.execute('', maxCount);
-        this.flush();
+        this.executeFlush('', maxCount);
         return this.streamPromise(stream, this.inQueryParsed);
     }
-    simpleQuery(statement, stream=new ObjectReader()) {
-        let off = 5; this._wbuf[0] = 81; // Q -- Query
-        off = wstr(this, statement, off); // overflow
-        w32(this._wbuf, off-1, 1);
-        this._connection.write(slice(this._wbuf, 0, off));
-        return this.streamPromise(stream, {name: '', rowParser: null});
-    }
     query(statement, values=[], stream=new ObjectReader()) {
-        const parsed = this.getParsedStatement(statement);
-        this.bind('', parsed.name, values);
-        this.execute('');
-        this.sync();
+        const parsed = this.parseStatement(statement);
+        this.bindExecuteSync('', parsed.name, 0, values);
         return this.streamPromise(stream, parsed);
     }
-    copyTo(statement, values, stream=new CopyReader()) {
-        this.parse('', statement);
-        this.bind('', '', values);
-        this.execute('');
-        this.sync();
-        return this.streamPromise(stream, {name: '', rowParser: null});
-    }
-    copyFrom(statement, values, stream=new CopyReader()) {
-        this.parse('', statement);
-        this.bind('', '', values);
-        this.execute('');
-        return this.streamPromise(stream, {name: '', rowParser: null});
-    }
+    copy(statement, values, stream=new CopyReader()) { return this.query(statement, values, stream); }
 }
 
 class ObjectReader {
@@ -423,7 +423,7 @@ class RowParser {
 }
 RowParser.parseComplete = function(buf) {
     const str = buf.toString('utf8', 5, 1 + r32(buf, 1));
-    const [_, cmd, oid, rowCount] = str.match(/^(\S+)( \d+)?( \d+)\u0000/) || str.match(/^(\S+)\u0000/);
+    const [_, cmd, oid, rowCount] = str.match(/^(\S+)( \d+)?( \d+)\u0000/) || str.match(/^([^\u0000]*)\u0000/);
     return {cmd, oid, rowCount: parseInt(rowCount || 0)};
 };
 RowParser.parseField = function(buf, off, dst, field) {
