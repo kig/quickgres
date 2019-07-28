@@ -6,7 +6,6 @@ const assert = require('assert');
 
 function r32(buf, off){ return (buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3]; }
 function r16(buf, off){ return (buf[off] << 8) | buf[off+1]; }
-
 function w32(buf, v, off) { // Write 32-bit big-endian int
     buf[off++] = (v >> 24) & 0xFF;
     buf[off++] = (v >> 16) & 0xFF;

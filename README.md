@@ -1,4 +1,4 @@
-# Quickgres 0.2.0
+# Quickgres 0.2.1-rc0
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -11,14 +11,14 @@ Features
  * Lightly tested SSL connection support.
  * Plaintext & MD5 password authentication.
  * Partial query readback.
- * You should be able to execute 2GB size queries (If you want to store movies in TOAST columns? (Maybe use large objects instead.)) I haven't tried it though, and the write buffer is resized to the largest seen message size so you'll end up using 2GB RAM per connection if you try.
+ * You should be able to execute 2GB size queries (If you want to store movies in TOAST columns? (Maybe use large objects instead.)) I haven't tried it though.
  
 Lacking
- * Bullet-proof write buffer resize
  * Full test suite
  * SASL authentication
  * Streaming replication (For your JavaScript DB synced via WAL shipping?)
  * No type parsing (This is more like a feature.)
+ * Binary values?
  * Simple queries are deprecated in favor of parameterized queries.
 
 What's it good for? It's relatively small so you can read it. It doesn't have deps, so you don't need to worry about npm dephell. Mostly use it for bed-time reading.
@@ -96,43 +96,52 @@ On a 13" Macbook Pro 2018 (2.3 GHz Intel Core i5), PostgreSQL 11.3.
 
 ```bash
 $ node test.js testdb
+$ node test.js qcard
 received 1000011 rows
-374535.9550561798 'partial query (100 rows per execute) rows per second'
+379510.8159392789 'partial query (100 rows per execute) rows per second'
 received 10000 rows
-277777.77777777775 'partial query (early exit) rows per second'
+312500 'partial query (early exit) rows per second'
 warming up 30000 / 30000     
-30150.75376884422 'random queries per second'
-358684.0028694405 'query rows per second'
+35087.71929824561 'random queries per second'
+604601.5719467957 'query raw rows per second'
+373138.4328358209 'query rows per second'
+385955.61559243535 'query array rows per second'
 Deleted 1000011 rows from users_copy
-41379.31034482759 'inserts per second'
-498013.44621513947 'text copyTo rows per second'
-457670.938215103 'csv copyTo rows per second'
-626573.9348370928 'binary copyTo rows per second'
+40000 'inserts per second'
+487334.7953216374 'text copyTo rows per second'
+479391.65867689357 'csv copyTo rows per second'
+655745.5737704918 'binary copyTo rows per second'
 Deleted 30000 rows from users_copy
-256347.60317867214 'binary copyFrom rows per second'
+218486.34476731485 'binary copyFrom rows per second'
 
 done
 
 Testing SSL connection
 received 1000011 rows
-347588.11261730967 'partial query (100 rows per execute) rows per second'
+354613.829787234 'partial query (100 rows per execute) rows per second'
 received 10000 rows
-384615.3846153846 'partial query (early exit) rows per second'
+357142.85714285716 'partial query (early exit) rows per second'
 warming up 30000 / 30000     
-25146.68901927913 'random queries per second'
-368192.56259204715 'query rows per second'
+24711.69686985173 'random queries per second'
+630921.7665615142 'query raw rows per second'
+403067.7146311971 'query rows per second'
+450252.58892390813 'query array rows per second'
 Deleted 1000011 rows from users_copy
-28571.428571428572 'inserts per second'
-543779.7716150081 'text copyTo rows per second'
-546752.870420995 'csv copyTo rows per second'
-798731.6293929713 'binary copyTo rows per second'
+25445.29262086514 'inserts per second'
+554329.822616408 'text copyTo rows per second'
+559916.5733482643 'csv copyTo rows per second'
+823733.1136738056 'binary copyTo rows per second'
 Deleted 30000 rows from users_copy
-245763.5782747604 'binary copyFrom rows per second'
+260419.79166666666 'binary copyFrom rows per second'
 
 done
 
 $ node test-max-rw.js testdb
     24996 session RWs per second              
+done
+
+$ node test-max-r.js testdb
+    133734 session Rs per second              
 done
 ```
 
