@@ -19,11 +19,6 @@ function w16(buf, v, off) { // Write 16-bit big-endian int
     buf[off++] = v & 0xFF;
     return off;
 }
-function slice(buf, start, end) { // Copying slice, used to work around full sockets not copying write buffers
-    const dst = Buffer.allocUnsafe(end - start);
-    buf.copy(dst, 0, start, end);
-    return dst;
-}
 
 class Client {
     constructor(config) {
@@ -31,7 +26,7 @@ class Client {
         assert(config.database, "No 'database' defined in config");
         this._parsedStatementCount = 1;
         this._parsedStatements = {};
-        this._packet = { buf: Buffer.alloc(2**16), cmd: 0, len: 0, idx: 0 };
+        this._packet = { buf: Buffer.alloc(2**16), head: Buffer.alloc(4), cmd: 0, len: 0, idx: 0 };
         this._outStreams = [];
         this.authenticationOk = false;
         this.serverParameters = {};
@@ -81,113 +76,98 @@ class Client {
         for (var i = 0; i < buf.byteLength;) {
             if (packet.cmd === 0) {
                 packet.cmd = buf[i++];
-                packet.buf[0] = packet.cmd;
                 packet.length = 0;
                 packet.index = 0;
             } else if (packet.index < 4) {
-                packet.buf[++packet.index] = buf[i++];
+                packet.head[packet.index++] = buf[i++];
                 if (packet.index === 4) {
-                    packet.length = r32(packet.buf, 1);
-                    if (packet.buf.byteLength < packet.length+1) {
-                        const newBuf = Buffer.allocUnsafe(packet.length+1);
-                        packet.buf.copy(newBuf, 0, 0, 5);
-                        packet.buf = newBuf;
-                    }
+                    packet.length = r32(packet.head, 0);
+                    packet.buf = packet.buf.byteLength >= packet.length + 1 ? packet.buf : Buffer.allocUnsafe(packet.length + 1);
+                    packet.buf[0] = packet.cmd; 
+                    packet.buf[1] = packet.head[0]; packet.buf[2] = packet.head[1]; packet.buf[3] = packet.head[2]; packet.buf[4] = packet.head[3];
                 }
             }
             if (packet.index >= 4) {
-                const slice = buf.slice(i, i + (packet.length - packet.index));
-                slice.copy(packet.buf, packet.index+1);
-                packet.index += slice.byteLength;
-                i += slice.byteLength;
+                const copiedBytes = buf.copy(packet.buf, packet.index+1, i, i + (packet.length - packet.index));
+                packet.index += copiedBytes;
+                i += copiedBytes;
                 if (packet.index === packet.length) {
-                    this.processPacket(packet, 5, this._outStreams[0]);
+                    this.processPacket(packet.buf, packet.cmd, packet.length, 5, this._outStreams[0]);
                     packet.cmd = 0;
                 }
             }
         }
     }
-    processPacket(packet, off, outStream) {
-        const { buf, cmd, length } = packet;
-        switch (cmd) {
-            case 68: // D -- DataRow
-                outStream.stream.rowParser = outStream.parsed.rowParser;
-                outStream.stream.write(buf.slice(0, length+1));
-                break;
-            case 100: // CopyData
-                outStream.stream.write(buf.slice(0, length+1));
-                break;
-            case 84: // T -- RowDescription
-                outStream.parsed.rowParser = new RowParser(buf);
-            case 73: // I -- EmptyQueryResponse
-            case 72: // CopyOutResponse
-            case 99: // CopyDone
-                outStream.stream.write(buf.slice(0, length+1));
-            case 110: // NoData
-            case 116: // ParameterDescription
-            case 49: // 1 -- ParseComplete
-            case 50: // 2 -- BindComplete
-            case 51: // 3 -- CloseComplete
-                break;
-            case 67: // C -- CommandComplete
-                if (this.inQuery) this.zeroParamCmd(83); // S -- Sync
-                outStream.stream.write(buf.slice(0, length+1));
-                break;
-            case 115: // s -- PortalSuspended
-            case 71: // CopyInResponse
-            case 87: // CopyBothResponse
-                outStream.stream.write(buf.slice(0, length+1));
-                this._outStreams.shift();
-                outStream.resolve(outStream.stream);
-                break;
-            case 90: // Z -- ReadyForQuery
-                this.inQuery = null;
-                this._outStreams.shift();
-                if (outStream) outStream.resolve(outStream.stream);
-                break;
-            case 69: // E -- Error
-                const fieldType = buf[off]; ++off;
-                const string = buf.toString('utf8', off, off + length - 5);
-                console.error(cmd, String.fromCharCode(cmd), length, fieldType, string);
-                this._outStreams.shift();
-                if (outStream) outStream.reject(Error(string));
-                break;
-            case 83: // S -- ParameterStatus
-                const kv = buf.toString('utf8', off, off + length - 5)
-                const [key, value] = kv.split('\0');
-                this.serverParameters[key] = value;
-                break;
-            case 82: // R -- Authentication
-                const authResult = r32(buf, off); off += 4;
-                if (authResult === 0) this.authenticationOk = true;
-                else if (authResult === 3) { // 3 -- AuthenticationCleartextPassword
-                    assert(this.config.password !== undefined, "No password supplied");
-                    this.authResponse(Buffer.from(this.config.password + '\0')); 
-                } else if (authResult === 5) { // 5 -- AuthenticationMD5Password
-                    assert(this.config.password !== undefined, "No password supplied");
-                    const upHash = crypto.createHash('md5').update(this.config.password).update(this.config.user).digest('hex');
-                    const salted = crypto.createHash('md5').update(upHash).update(buf.slice(off, off+4)).digest('hex');
-                    this.authResponse(Buffer.from(`md5${salted}\0`)); 
-                } else { this.end(); throw(Error(`Authentication method ${authResult} not supported`)); }
-                break;
-            case 78: // NoticeResponse
-                if (this.onNotice) this.onNotice(buf);
-                break;
-            case 65: // NotificationResponse
-                if (this.onNotification) this.onNotification(buf);
-                break;
-            case 75: // K -- BackendKeyData
-                this.backendKey = Buffer.from(buf.slice(off, off + length - 4));
-                break;
-            case 118: // NegotiateProtocolVersion
-                this.end(); throw(Error('NegotiateProtocolVersion not implemented'));
-            case 86: // FunctionCallResponse -- Legacy, not supported.
-                this.end(); throw(Error('FunctionCallResponse not implemented'));
-            default:
-                console.error(cmd, String.fromCharCode(cmd), length, buf.toString('utf8', off, off + length - 4));
-                this.end(); throw(Error('Unknown message. Protocol state unknown, exiting.'));
-        }
-    }
+    processPacket(buf, cmd, length, off, outStream) { switch(cmd) {
+        case 68: // D -- DataRow
+            outStream.stream.rowParser = outStream.parsed.rowParser;
+            outStream.stream.write(buf.slice(0, length+1));
+            break;
+        case 100: // CopyData
+            outStream.stream.write(buf.slice(0, length+1));
+            break;
+        case 84: // T -- RowDescription
+            outStream.parsed.rowParser = new RowParser(buf);
+        case 73: case 72: case 99: // EmptyQueryResponse / CopyOutResponse / CopyDone
+            outStream.stream.write(buf.slice(0, length+1));
+        case 110: case 116: case 49: case 50: case 51: // NoData / ParameterDescription / {Parse,Bind,Close}Complete
+            break;
+        case 67: // C -- CommandComplete
+            if (this.inQuery) this.zeroParamCmd(83); // S -- Sync
+            outStream.stream.write(buf.slice(0, length+1));
+            break;
+        case 115: case 71: case 87: // PortalSuspended / CopyInResponse / CopyBothResponse
+            outStream.stream.write(buf.slice(0, length+1));
+            this._outStreams.shift();
+            outStream.resolve(outStream.stream);
+            break;
+        case 90: // Z -- ReadyForQuery
+            this.inQuery = null;
+            this._outStreams.shift();
+            if (outStream) outStream.resolve(outStream.stream);
+            break;
+        case 69: // E -- Error
+            const fieldType = buf[off]; ++off;
+            const string = buf.toString('utf8', off, off + length - 5);
+            console.error(cmd, String.fromCharCode(cmd), length, fieldType, string);
+            this._outStreams.shift();
+            if (outStream) outStream.reject(Error(string));
+            break;
+        case 83: // S -- ParameterStatus
+            const kv = buf.toString('utf8', off, off + length - 5)
+            const [key, value] = kv.split('\0');
+            this.serverParameters[key] = value;
+            break;
+        case 82: // R -- Authentication
+            const authResult = r32(buf, off); off += 4;
+            if (authResult === 0) this.authenticationOk = true;
+            else if (authResult === 3) { // 3 -- AuthenticationCleartextPassword
+                assert(this.config.password !== undefined, "No password supplied");
+                this.authResponse(Buffer.from(this.config.password + '\0')); 
+            } else if (authResult === 5) { // 5 -- AuthenticationMD5Password
+                assert(this.config.password !== undefined, "No password supplied");
+                const upHash = crypto.createHash('md5').update(this.config.password).update(this.config.user).digest('hex');
+                const salted = crypto.createHash('md5').update(upHash).update(buf.slice(off, off+4)).digest('hex');
+                this.authResponse(Buffer.from(`md5${salted}\0`)); 
+            } else { this.end(); throw(Error(`Authentication method ${authResult} not supported`)); }
+            break;
+        case 78: // NoticeResponse
+            if (this.onNotice) this.onNotice(buf);
+            break;
+        case 65: // NotificationResponse
+            if (this.onNotification) this.onNotification(buf);
+            break;
+        case 75: // K -- BackendKeyData
+            this.backendKey = Buffer.from(buf.slice(off, off + length - 4));
+            break;
+        case 118: // NegotiateProtocolVersion
+            this.end(); throw(Error('NegotiateProtocolVersion not implemented'));
+        case 86: // FunctionCallResponse -- Legacy, not supported.
+            this.end(); throw(Error('FunctionCallResponse not implemented'));
+        default:
+            console.error(cmd, String.fromCharCode(cmd), length, buf.toString('utf8', off, off + length - 4));
+            this.end(); throw(Error('Unknown message. Protocol state unknown, exiting.'));
+    } }
     promise(stream, parsed) { return new Promise((resolve, reject) => this._outStreams.push({stream, parsed, resolve, reject})); }
     parseAndDescribe(statementName, statement, types=[]) {
         const strBuf = Buffer.from(`${statementName}\0${statement}\0`);
@@ -318,9 +298,9 @@ class Client {
         return this.promise(stream, null);
     }
 }
-class ObjectReader {
-    constructor() { this.rows = [], this.cmd = this.oid = undefined, this.rowCount = 0; }
-    parseRow(buf) { return this.rowParser.parse(buf); }
+class RawReader {
+    constructor() { this.rows = [], this.cmd = this.oid = this.rowParser = undefined, this.rowCount = 0; }
+    parseRow(buf) { return Buffer.from(buf); }
     write(buf) { switch(buf[0]) {
         case 68: return this.rows.push(this.parseRow(buf)); // D -- DataRow
         case 67: // C -- CommandComplete
@@ -331,11 +311,11 @@ class ObjectReader {
         case 115: return this.cmd = 'SUSPENDED'; // s -- PortalSuspended
     } }
 }
-class ArrayReader extends ObjectReader { parseRow(buf) { return RowParser.parseArray(buf); } }
-class RawReader extends ObjectReader { parseRow(buf) { return slice(buf, 0, buf.byteLength); } }
-class CopyReader extends ObjectReader {
+class ArrayReader extends RawReader { parseRow(buf) { return RowParser.parseArray(buf); } }
+class ObjectReader extends RawReader { parseRow(buf) { return this.rowParser.parse(buf); } }
+class CopyReader extends RawReader {
     write(buf, off=0) { switch(buf[off++]) {
-        case 100: return this.rows.push(slice(buf, off+4, off + r32(buf, off))); // CopyData
+        case 100: return this.rows.push(Buffer.from(buf.slice(off+4, off + r32(buf, off)))); // CopyData
         case 99: return this.cmd = 'COPY'; // CopyDone
         case 71: case 87: case 72: // Copy{In,Both,Out}Response
             this.format = buf[off+4]; off += 5;
@@ -365,20 +345,22 @@ class RowParser {
     }
     parse(buf, off=0, dst=new this.fieldObj()) {
         const fieldCount = r16(buf, off+5); off += 7;
-        for (let i = 0; i < fieldCount; i++) off = RowParser.parseField(buf, off, dst, this.fields[i].name);
+        for (let i = 0; i < fieldCount; i++) {
+            const fieldLength = r32(buf, off); off += 4;
+            if (fieldLength < 0) dst[this.fields[i].name] = null;
+            else dst[this.fields[i].name] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
+        }
         return dst;
     }
 }
-RowParser.parseField = function(buf, off, dst, field) {
-    const fieldLength = r32(buf, off); off += 4;
-    if (fieldLength < 0) dst[field] = null;
-    else dst[field] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
-    return off;
-}
 RowParser.parseArray = function(buf, off=0, dst=[]) {
     const fieldCount = r16(buf, off+5); off += 7;
-    for (let i = 0; i < fieldCount; i++) off = RowParser.parseField(buf, off, dst, i);
+    for (let i = 0; i < fieldCount; i++) {
+        const fieldLength = r32(buf, off); off += 4;
+        if (fieldLength < 0) dst[i] = null;
+        else dst[i] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
+    }
     return dst;
-}
+};
 
 module.exports = { Client, ObjectReader, ArrayReader, RawReader, CopyReader, RowParser };

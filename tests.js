@@ -108,6 +108,12 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     t0 = Date.now();
+    result = await client.query('SELECT * FROM users', [], new RawReader());
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'query raw rows per second');
+    result = null;
+
+    await testProtocolState(client);
+    t0 = Date.now();
     result = await client.query('SELECT * FROM users', []);
     console.error(1000 * result.rows.length / (Date.now() - t0), 'query rows per second');
     result = null;
@@ -117,12 +123,6 @@ module.exports = async function runTest(client) {
     result = await client.query('SELECT * FROM users', [], new ArrayReader());
     console.error(1000 * result.rows.length / (Date.now() - t0), 'query array rows per second');
     copyResult = result;
-    result = null;
-
-    await testProtocolState(client);
-    t0 = Date.now();
-    result = await client.query('SELECT * FROM users', [], new RawReader());
-    console.error(1000 * result.rows.length / (Date.now() - t0), 'query raw rows per second');
     result = null;
 
     await testProtocolState(client);
