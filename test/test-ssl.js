@@ -1,4 +1,4 @@
-const { Client } = require('.');
+const { Client } = require('..');
 const fs = require('fs');
 
 async function go() {

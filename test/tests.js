@@ -1,4 +1,4 @@
-const { Client, ObjectReader, ArrayReader, RawReader, CopyReader } = require('.');
+const { Client, ObjectReader, ArrayReader, RawReader, CopyReader } = require('..');
 const assert = require('assert');
 
 async function testProtocolState(client) {
@@ -48,7 +48,19 @@ async function testProtocolState(client) {
     assert(result.rows.length === 0, 'DELETE 2 got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
     assert(result.rowCount === 2, 'DELETE 2 has wrong rowCount' + ` ${JSON.stringify(result)}`);
     assert(result.cmd === 'DELETE', 'DELETE 2 has wrong cmd' + ` ${JSON.stringify(result)}`)
+}
 
+function randomBytes() {
+    var length = Math.round(Math.pow(Math.random(), 8) * 10000);
+    var buf = Buffer.alloc(length);
+    for (let i = 0; i < buf.byteLength; i++) {
+        buf[i] = (Math.random() * 256) | 0;
+    }
+    return '\\x' + buf.toString('hex');
+}
+
+function randomString() {
+    return (Math.random() * 1e12).toString(36);
 }
 
 module.exports = async function runTest(client) {
@@ -89,7 +101,7 @@ module.exports = async function runTest(client) {
             await Promise.all(promises);
             process.stderr.write(`\rwarming up ${i} / 30000     `);
         }
-        const id = Math.floor(Math.random() * 1000000).toString();
+        const id = Math.random() < 0.99 ? Math.floor(Math.random() * 1000000).toString() : randomString();
         promises.push(client.query('SELECT * FROM users WHERE email = $1', [id]));
     }
     process.stderr.write(`\rwarming up ${i} / 30000\n`);
@@ -101,10 +113,15 @@ module.exports = async function runTest(client) {
         const id = Math.floor(Math.random() * 1000000).toString();
         promises.push(client.query('SELECT * FROM users WHERE email = $1', [id]));
     }
-    result = await Promise.all(promises);
     console.error(1000 * result.length / (Date.now() - t0), 'random queries per second');
     promises.splice(0);
     result = null;
+
+    for (var i = 0; i < 100; i++) {
+        const randos = randomBytes();
+        result = await client.query('SELECT $1::bytea', [randos], new ArrayReader());
+        assert(result.rows[0][0] === randos, "Bytea roundtrip failed " + randos + " !== " + result.rows[0][0]);
+    }
 
     await testProtocolState(client);
     t0 = Date.now();

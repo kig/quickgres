@@ -1,4 +1,4 @@
-const { Client } = require('.');
+const { Client } = require('..');
 
 async function go() {
     const client = new Client({ user: process.env.USER, database: process.argv[2] });

@@ -1,5 +1,5 @@
 const cluster = require('cluster');
-const numCPUs = require('os').cpus().length / 4;
+const numCPUs = require('os').cpus().length / 2;
 
 if (cluster.isMaster) {
     for (let i = 0; i < numCPUs; i++) cluster.fork();
@@ -12,17 +12,15 @@ if (cluster.isMaster) {
         }
     });
 } else {
-    const { Client, ArrayReader } = require('.');
+    const { Client, ArrayReader } = require('..');
 
-    async function sessionRW(client, id) {
-        const {rows: [[uid, data]]} = await client.query('SELECT u.id, u.data FROM sessions_copy s, users_copy2 u WHERE s.id = $1 AND s.deleted = FALSE AND s.owner = u.id', [id], new ArrayReader());
-        await client.query('UPDATE users_copy2 SET data = $1 WHERE id = $2', [data.split('').reverse().join(''), uid]);
-        return null;
+    async function sessionR(client, id) {
+        await client.query('SELECT * FROM sessions_copy s WHERE s.id = $1 AND s.deleted = FALSE', [id], new ArrayReader());
     }
 
     async function go() {
         const clients = [];
-        for (let i = 0; i < Math.floor(100/numCPUs); i++) clients[i] = new Client({ user: process.env.USER, database: process.argv[2] });
+        for (let i = 0; i < 10; i++) clients[i] = new Client({ user: process.env.USER, database: process.argv[2] });
         await Promise.all(clients.map(c => c.connect('/tmp/.s.PGSQL.5432')));
 
         let t0, result, copyResult;
@@ -33,13 +31,13 @@ if (cluster.isMaster) {
         for (let i = 0; i < 100000; i++) {
             if (i % 1000 === 999) {
                 result += (await Promise.all(promises)).length, promises = [];
-                process.stderr.write(`    ${Math.floor(1000 * numCPUs * result / (Date.now() - t0))} session RWs per second              \r`);
+                process.stderr.write(`    ${Math.floor(1000 * numCPUs * result / (Date.now() - t0))} session Rs per second              \r`);
             }
             const id = Math.floor(1+Math.random() * 900000).toString();
-            promises.push(sessionRW(clients[i % clients.length], id));
+            promises.push(sessionR(clients[i % clients.length], id));
         }
         result += (await Promise.all(promises)).length;
-        process.stderr.write(`    ${Math.floor(1000 * numCPUs * result / (Date.now() - t0))} session RWs per second              \r`);
+        process.stderr.write(`    ${Math.floor(1000 * numCPUs * result / (Date.now() - t0))} session Rs per second              \r`);
 
         await Promise.all(clients.map(c => c.end()));
         process.exit();
