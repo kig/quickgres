@@ -1,4 +1,4 @@
-# Quickgres 0.2.1
+# Quickgres 0.2.2-rc0
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -12,6 +12,7 @@ Features
  * Plaintext & MD5 password authentication.
  * Partial query readback.
  * You should be able to execute 2GB size queries (If you want to store movies in TOAST columns? (Maybe use large objects instead.)) I haven't tried it though.
+ * Canceling long running queries.
  
 Lacking
  * Full test suite
@@ -87,6 +88,8 @@ go();
 ```
 
 ## Changelog
+
+ * 0.2.2-rc0: Request canceling with `cancel`, made statement caching optional, tests for bytea roundtrips and large objects, squeeze to 347 lines.
 
  * 0.2.1: Allocate exact size message write buffers (yay), removed `describe` methods, more tests, inlined row parsers, added RawReader, minor optimizations, cut lines to 365 from 441.
 
