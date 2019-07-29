@@ -42,13 +42,8 @@ class Client {
     onInitialConnect() {
         if (this.config.ssl) {
             this._connection.once('data', this.onSSLResponse.bind(this));
-            const msg = Buffer.allocUnsafe(8);
-            w32(msg, 8, 0);
-            w32(msg, 80877103, 4);  // SSL Request
-            this._connection.write(msg);
-        } else {
-            this.onConnect();
-        }
+            this._connection.write(Buffer.from([0,0,0,8,4,210,22,47])); // SSL Request
+        } else this.onConnect();
     }
     onSSLResponse(buffer) {
         if (buffer[0] !== 83) throw Error("Error establishing an SSL connection");
@@ -57,12 +52,12 @@ class Client {
     }
     onConnect() {
         if (this.config.cancel) {
-            this._connection.write(Buffer.concat([Buffer.from([0,0,0,16,4,210,22,46]), this.config.cancel]));
+            this._connection.write(Buffer.concat([Buffer.from([0,0,0,16,4,210,22,46]), this.config.cancel])); // CancelRequest
             this._connection.destroy();
             return this._outStreams[0].resolve();
         }
         this._connection.on('data', this.onData.bind(this));
-        let chunks = [Buffer.from('\x00\x00\x00\x00\x00\x03\x00\x00')];
+        let chunks = [Buffer.from([0,0,0,0,0,3,0,0])]; // Protocol version 3.0
         const filteredKeys = {password: 1, ssl: 1};
         for (let n in this.config) {
             if (filteredKeys[n]) continue;
