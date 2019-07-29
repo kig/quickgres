@@ -23,15 +23,22 @@ class Client {
     }
     connect(address, host) {
         this.address = address, this.host = host;
-        this._connection = net.createConnection(address, host);
-        this._connection.once('connect', this.onInitialConnect.bind(this));
+        this._connect();
         return this.promise(null, null);
+    }
+    _connect() {
+        this._connection = net.createConnection(this.address, this.host);
+        this._connection.once('connect', this.onInitialConnect.bind(this));
+        this._connection.on('error', this.onError.bind(this));
     }
     end() { 
         this.terminate();
         return this._connection.end();
     }
-    onError(err) { this._outStreams.splice(0).forEach(s => s.reject(err)); }
+    onError(err) {
+        if (err.message.startsWith('connect EAGAIN ')) this._connect();
+        else this._outStreams.splice(0).forEach(s => s.reject(err));
+    }
     onInitialConnect() {
         if (this.config.ssl) {
             this._connection.once('data', this.onSSLResponse.bind(this));
@@ -46,9 +53,9 @@ class Client {
     onSSLResponse(buffer) {
         if (buffer[0] !== 83) throw Error("Error establishing an SSL connection");
         this._connection = tls.connect({socket: this._connection, ...this.config.ssl}, this.onConnect.bind(this));
+        this._connection.on('error', this.onError.bind(this));
     }
     onConnect() {
-        this._connection.on('error', this.onError.bind(this));
         if (this.config.cancel) {
             this._connection.write(Buffer.concat([Buffer.from([0,0,0,16,4,210,22,46]), this.config.cancel]));
             this._connection.destroy();
