@@ -1,6 +1,6 @@
 {
   "name": "quickgres",
-  "version": "0.2.2-rc0",
+  "version": "0.2.2-rc1",
   "description": "Quick native-JS PostgreSQL client library",
   "main": "index.js",
   "repository": "https://github.com/kig/quickgres",

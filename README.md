@@ -1,4 +1,4 @@
-# Quickgres 0.2.2-rc0
+# Quickgres 0.2.2-rc1
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -89,7 +89,7 @@ go();
 
 ## Changelog
 
- * 0.2.2-rc0: Request canceling with `cancel`, made statement caching optional, tests for bytea roundtrips and large objects, squeeze to 347 lines.
+ * 0.2.2-rc1: Request canceling with `cancel`, made statement caching optional, tests for bytea roundtrips and large objects, recover from connection-time `EAGAIN`, squeeze to 349 lines.
 
  * 0.2.1: Allocate exact size message write buffers (yay), removed `describe` methods, more tests, inlined row parsers, added RawReader, minor optimizations, cut lines to 365 from 441.
 
@@ -147,6 +147,30 @@ done
 
 $ node test-max-r.js testdb
     133734 session Rs per second              
+done
+```
+
+On a 16-core server with 64 GB RAM and Optane. (NB the `numCPUs` and connections per CPU have been tuned.)
+
+```bash
+$ node test/test-max-rw.js testdb
+    82215 session RWs per second              
+done
+
+$ node test/test-max-r.js testdb
+    308969 session Rs per second              
+done
+```
+
+On a 16-core server faster CPU, 32 GB RAM and flash SSD.
+
+```bash
+$ node test/test-max-rw.js testdb
+    64717 session RWs per second              
+done
+
+$ node test/test-max-r.js testdb
+    547336 session Rs per second              
 done
 ```
 
