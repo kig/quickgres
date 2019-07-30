@@ -59,10 +59,7 @@ class Client {
         this._connection.on('data', this.onData.bind(this));
         let chunks = [Buffer.from([0,0,0,0,0,3,0,0])]; // Protocol version 3.0
         const filteredKeys = {password: 1, ssl: 1};
-        for (let n in this.config) {
-            if (filteredKeys[n]) continue;
-            chunks.push(Buffer.from(`${n}\0${this.config[n]}\0`));
-        }
+        for (let n in this.config) if (!filteredKeys[n]) chunks.push(Buffer.from(`${n}\0${this.config[n]}\0`));
         chunks.push(Buffer.alloc(1));
         const msg = Buffer.concat(chunks);
         w32(msg, msg.byteLength, 0);
