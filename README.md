@@ -174,6 +174,14 @@ $ node test/test-max-r.js testdb
 done
 ```
 
+Running server on one 16-core machine, client on another.
+
+```bash
+$ node test/test-max-rw.js testdb
+    101201 session RWs per second              
+done
+```
+
 ## Author
 Ilmari Heikkinen <hei@heichen.hk>
 
