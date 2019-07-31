@@ -1,4 +1,4 @@
-const { Client, ObjectReader, ArrayReader, RawReader, CopyReader } = require('..');
+const { Client } = require('..');
 const assert = require('assert');
 
 async function testProtocolState(client) {
@@ -6,6 +6,12 @@ async function testProtocolState(client) {
     assert(result.rows.length === 10, `SELECT 1 got ${result.rows.length} users but wanted 10`);
     assert(result.rowCount === 10, 'SELECT 1 has wrong rowCount' + ` ${JSON.stringify(result)}`);
     assert(result.cmd === 'SELECT', 'SELECT 1 has wrong cmd' + ` ${JSON.stringify(result)}`)
+
+    result = await client.query('SELECT 1234 as toObject, 5678 as toArray');
+    assert(result.rows[0].toobject === '1234', 'toObject not working as column name');
+    assert(result.rows[0].toarray === '5678', 'toArray not working as column name');
+    assert(result.rows[0].toArray().join(",") === '1234,5678', 'toArray not working');
+    assert(JSON.stringify(result.rows[0].toObject()) === JSON.stringify({toobject:'1234',toarray:'5678'}), 'toObject not working');
 
     result = await client.query('CREATE TABLE IF NOT EXISTS users_test (name text, email text, password text)');
     assert(result.rows.length === 0, 'CREATE TABLE got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
@@ -56,7 +62,7 @@ function randomBytes() {
     for (let i = 0; i < buf.byteLength; i++) {
         buf[i] = (Math.random() * 256) | 0;
     }
-    return '\\x' + buf.toString('hex');
+    return buf;
 }
 
 function randomString() {
@@ -65,25 +71,74 @@ function randomString() {
 
 module.exports = async function runTest(client) {
     let t0, result, copyResult;
-    const promises = [];
+    let promises = [], count = 0;
 
+    { // README examples
+        console.error(client.serverParameters);
+
+        // Access row fields as object properties.
+        let { rows, rowCount } = await client.query(
+            'SELECT name, email FROM users WHERE id = $1', ['adb42e46-d1bc-4b64-88f4-3e754ab52e81']);
+        console.error(rows[0].name, rows[0].email, rowCount);
+        console.error(rows[0][0], rows[0][1], rowCount);
+
+        // You can also convert the row into an object or an array.
+        assert(rows[0].toObject().name === rows[0].toArray()[0]);
+
+        // Stream raw query results protocol to stdout (why waste cycles on parsing data...)
+        await client.query(
+            'SELECT name, email FROM users WHERE id = $1', 
+            ['adb42e46-d1bc-4b64-88f4-3e754ab52e81'], 
+            Client.STRING, // Or Client.BINARY. Controls the format of data that PostgreSQL sends you.
+            true, // Cache the parsed query (default is true. If you use the query text only once, set this to false.)
+            process.stdout // The result stream. Client calls stream.write(buffer) on this. See ObjectReader for details.
+        );
+
+        // Binary data
+        const buf = Buffer.from([0,1,2,3,4,5,255,254,253,252,251,0]);
+        const result = await client.query('SELECT $1::bytea', [buf], Client.BINARY, false);
+        assert(buf.toString('hex') === result.rows[0][0].toString('hex'), "bytea roundtrip failed");
+
+        // Query execution happens in a pipelined fashion, so when you do a million 
+        // random SELECTs, they get written to the server right away, and the server
+        // replies are streamed back to you.
+        promises = [];
+        for (let i = 0; i < 100; i++) {
+            const id = Math.floor(Math.random()*1000000).toString();
+            promises.push(client.query('SELECT * FROM users WHERE email = $1', [id]));
+        }
+        await Promise.all(promises);
+
+        // Partial query results
+        client.startQuery('SELECT * FROM users', []);
+        while (client.inQuery) {
+            const resultChunk = await client.getResults(100);
+            // To stop receiving chunks, send a sync.
+            if (resultChunk.rows.length > 1) {
+                await client.sync();
+                break;
+            }
+        }
+
+        console.error('\nREADME tests done\n')
+    }
 
     for (var i = 0; i < 100; i++) {
         const randos = randomBytes();
-        result = await client.query('SELECT $1::bytea, octet_length($1::bytea)', [randos], new ArrayReader());
-        assert(result.rows[0][0] === randos, "Bytea roundtrip failed " + randos + " !== " + result.rows[0][0]);
-        assert(parseInt(result.rows[0][1]) === randos.length/2-1, "Bytea wrong length " + (randos.length/2-1) + " !== " + result.rows[0][1]);
+        result = await client.query('SELECT $1::bytea, octet_length($1::bytea)', [randos], Client.BINARY);
+        assert(result.rows[0][0].toString('hex') === randos.toString('hex'), "Bytea roundtrip failed " + randos + " !== " + result.rows[0][0]);
+        assert(result.rows[0][1].readInt32BE(0) === randos.byteLength, "Bytea wrong length " + randos.byteLength + " !== " + result.rows[0][1]);
     }
 
     const bytes = Buffer.alloc(256);
     for (var i = 0; i < 256; i++) bytes[i] = i;
     await client.query('CREATE TABLE IF NOT EXISTS large_object_test (name text, file oid)');
-    await client.query('INSERT INTO large_object_test (name, file) VALUES ($1, lo_from_bytea(0, $2))', ['my_object', '\\x' + bytes.toString('hex')]);
-    result = await client.query('SELECT lo_get(file), octet_length(lo_get(file)) FROM large_object_test WHERE name = $1', ['my_object'], new ArrayReader());
+    await client.query('INSERT INTO large_object_test (name, file) VALUES ($1, lo_from_bytea(0, $2))', ['my_object', bytes]);
+    result = await client.query('SELECT lo_get(file), octet_length(lo_get(file)) FROM large_object_test WHERE name = $1', ['my_object'], Client.BINARY);
     await client.query('SELECT lo_unlink(file) FROM large_object_test WHERE name = $1', ['my_object']);
     await client.query('DROP TABLE large_object_test');
-    assert(parseInt(result.rows[0][1]) === 256, "Large object wrong length");
-    assert(result.rows[0][0] === '\\x' + bytes.toString('hex'), "Large object roundtrip failed");
+    assert(result.rows[0][1].readInt32BE(0) === 256, "Large object wrong length");
+    assert(result.rows[0][0].toString('hex') === bytes.toString('hex'), "Large object roundtrip failed");
 
     // Partial queries
     await testProtocolState(client);
@@ -137,14 +192,47 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     t0 = Date.now();
-    result = await client.query('SELECT * FROM users', [], new RawReader());
-    console.error(1000 * result.rows.length / (Date.now() - t0), 'query raw rows per second');
+    result = await client.query('SELECT * FROM users', []);
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'query rows per second');
     result = null;
 
     await testProtocolState(client);
     t0 = Date.now();
     result = await client.query('SELECT * FROM users', []);
-    console.error(1000 * result.rows.length / (Date.now() - t0), 'query rows per second');
+    count = 0;
+    for (let i = 0, rows = result.rows; i < rows.length; i++) count += rows[i].toArray().length;
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'query rows as arrays per second', count);
+    result = null;
+
+    await testProtocolState(client);
+    t0 = Date.now();
+    result = await client.query('SELECT * FROM users', []);
+    count = 0; 
+    for (let i = 0, rows = result.rows; i < rows.length; i++) count += rows[i].toObject() ? 1 : 0;
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'query rows as objects per second', count);
+    result = null;
+
+    await testProtocolState(client);
+    t0 = Date.now();
+    result = await client.query('SELECT * FROM users', [], Client.BINARY);
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'binary query rows per second');
+    result = null;
+
+    await testProtocolState(client);
+    t0 = Date.now();
+    result = await client.query('SELECT * FROM users', [], Client.BINARY);
+    count = 0;
+    for (let i = 0, rows = result.rows; i < rows.length; i++) count += rows[i].toArray().length;
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'binary query rows as arrays per second', count);
+    result = null;
+
+    await testProtocolState(client);
+    t0 = Date.now();
+    result = await client.query('SELECT * FROM users', [], Client.BINARY);
+    count = 0; 
+    for (let i = 0, rows = result.rows; i < rows.length; i++) count += rows[i].toObject() ? 1 : 0;
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'binary query rows as objects per second', count);
+    copyResult = result;
     result = null;
 
     await testProtocolState(client);
@@ -157,13 +245,6 @@ module.exports = async function runTest(client) {
         console.error('Cancel test: ' + err.message);
     }
     console.error('Elapsed: ' + (Date.now() - t0) + ' ms');
-    result = null;
-
-    await testProtocolState(client);
-    t0 = Date.now();
-    result = await client.query('SELECT * FROM users', [], new ArrayReader());
-    console.error(1000 * result.rows.length / (Date.now() - t0), 'query array rows per second');
-    copyResult = result;
     result = null;
 
     await testProtocolState(client);
@@ -184,12 +265,13 @@ module.exports = async function runTest(client) {
     client.query('BEGIN');
     result = 0;
     copyResult.rows.splice(30000); // Leave only 30k rows
-    for (let i = 0; i < copyResult.rows.length; i++) {
+    promises.push(client.query(insertQueryString, copyResult.rows[0].toArray()));
+    for (let i = 1; i < copyResult.rows.length; i++) {
         promises.push(client.query(insertQueryString, copyResult.rows[i]));
     }
     result += (await Promise.all(promises)).length;
     await client.query('COMMIT');
-    console.error(1000 * result / (Date.now() - t0), 'inserts per second');
+    console.error(1000 * result / (Date.now() - t0), 'binary inserts per second');
     promises.splice(0);
     copyResult = null;
     result = null;

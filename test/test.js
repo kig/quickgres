@@ -14,5 +14,9 @@ async function go() {
     require('./test-ssl');
 }
 
-go();
-
+try {
+    go();
+} catch(e) { 
+    console.error(e);
+    process.exit();
+}

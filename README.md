@@ -1,4 +1,4 @@
-# Quickgres 0.2.2-rc1
+# Quickgres 0.3.0-rc0
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -13,13 +13,13 @@ Features
  * Partial query readback.
  * You should be able to execute 2GB size queries (If you want to store movies in TOAST columns? (Maybe use large objects instead.)) I haven't tried it though.
  * Canceling long running queries.
- 
+ * Binary params, binary query results.
+
 Lacking
  * Full test suite
  * SASL authentication
  * Streaming replication (For your JavaScript DB synced via WAL shipping?)
  * No type parsing (This is more like a feature.)
- * Binary values?
  * Simple queries are deprecated in favor of parameterized queries.
 
 What's it good for? It's relatively small so you can read it. It doesn't have deps, so you don't need to worry about npm dephell. Mostly use it for bed-time reading.
@@ -38,18 +38,28 @@ async function go() {
     // await client.connect(5432, 'localhost'); // Connect to a TCP socket.
     console.error(client.serverParameters);
 
-    // Get rows parsed to JS objects.
-    let { rows, completes } = await client.query(
-        'SELECT name, email FROM users WHERE id = $1', ['1234']);
-    console.log(rows[0].name, rows[0].email, completes[0].rowCount);
+    // Access row fields as object properties.
+    let { rows, rowCount } = await client.query(
+        'SELECT name, email FROM users WHERE id = $1', ['adb42e46-d1bc-4b64-88f4-3e754ab52e81']);
+    console.log(rows[0].name, rows[0].email, rowCount);
+    console.log(rows[0][0], rows[0][1], rowCount);
 
-    // Get rows parsed to arrays.
-    let { rows, completes } = await client.query(
-        'SELECT name, email FROM users WHERE id = $1', ['1234'], new ArrayReader());
-    console.log(rows[0][0], rows[0][1], completes[0].rowCount);
+    // You can also convert the row into an object or an array.
+    assert(rows[0].toObject().name === rows[0].toArray()[0]);
 
     // Stream raw query results protocol to stdout (why waste cycles on parsing data...)
-    await client.query('SELECT name, email FROM users WHERE id = $1', ['1234'], process.stdout);
+    await client.query(
+        'SELECT name, email FROM users WHERE id = $1', 
+        ['adb42e46-d1bc-4b64-88f4-3e754ab52e81'], 
+        Client.STRING, // Or Client.BINARY. Controls the format of data that PostgreSQL sends you.
+        true, // Cache the parsed query (default is true. If you use the query text only once, set this to false.)
+        process.stdout // The result stream. Client calls stream.write(buffer) on this. See ObjectReader for details.
+    );
+
+    // Binary data
+    const buf = Buffer.from([0,1,2,3,4,5,255,254,253,252,251,0]);
+    const result = await client.query('SELECT $1::bytea', [buf], Client.BINARY, false);
+    assert(buf.toString('hex') === result.rows[0][0].toString('hex'), "bytea roundtrip failed");
 
     // Query execution happens in a pipelined fashion, so when you do a million 
     // random SELECTs, they get written to the server right away, and the server
@@ -88,6 +98,8 @@ go();
 ```
 
 ## Changelog
+ 
+ * 0.3.0-rc0: Binary query params, binary query results, lazy result parsing, rolled ObjectReader, ArrayReader and RawReader into RowReader, questionable life choices, bloat up to 401 lines 
 
  * 0.2.2-rc1: Request canceling with `cancel`, made statement caching optional, tests for bytea roundtrips and large objects, recover from connection-time `EAGAIN`, squeeze to 349 lines.
 
@@ -102,45 +114,47 @@ On a 13" Macbook Pro 2018 (2.3 GHz Intel Core i5), PostgreSQL 11.3.
 ```bash
 $ node test/test.js testdb
 received 1000011 rows
-385360.6936416185 'partial query (100 rows per execute) rows per second'
+443463.8580931264 'partial query (100 rows per execute) rows per second'
 received 10000 rows
-357142.85714285716 'partial query (early exit) rows per second'
+400000 'partial query (early exit) rows per second'
 warming up 30000 / 30000     
-41436.46408839779 'random queries per second'
-665786.2849533955 'query raw rows per second'
-388353.786407767 'query rows per second'
+33632.28699551569 'random queries per second'
+558041.8526785715 'query rows per second'
+668456.550802139 'binary query rows per second'
+493588.8450148075 'binary query rows as arrays per second' 10000110
+322792.4467398322 'query rows as objects per second' 1000011
 Cancel test: 83 ERROR VERROR C57014 Mcanceling statement due to user request Fpostgres.c L3070 RProcessInterrupts  
 Elapsed: 3 ms
-444646.9542018675 'query array rows per second'
 Deleted 1000011 rows from users_copy
-39735.09933774835 'inserts per second'
-539671.3437668645 'text copyTo rows per second'
-495791.2741695588 'csv copyTo rows per second'
-697358.4379358438 'binary copyTo rows per second'
+32292.787944025833 'inserts per second'
+457670.938215103 'text copyTo rows per second'
+415459.4931449938 'csv copyTo rows per second'
+594537.4554102259 'binary copyTo rows per second'
 Deleted 30000 rows from users_copy
-385509.63762528915 'binary copyFrom rows per second'
+238041.418709831 'binary copyFrom rows per second'
 
 done
 
 Testing SSL connection
 received 1000011 rows
-364435.4956268222 'partial query (100 rows per execute) rows per second'
+499007.48502994014 'partial query (100 rows per execute) rows per second'
 received 10000 rows
-322580.6451612903 'partial query (early exit) rows per second'
+416666.6666666667 'partial query (early exit) rows per second'
 warming up 30000 / 30000     
-28680.688336520077 'random queries per second'
-700778.5564120533 'query raw rows per second'
-412205.68837592745 'query rows per second'
+30864.197530864196 'random queries per second'
+725171.1385061638 'query rows per second'
+848905.7724957555 'binary query rows per second'
+617290.7407407408 'binary query rows as arrays per second' 10000110
+369007.74907749076 'query rows as objects per second' 1000011
 Cancel test: 83 ERROR VERROR C57014 Mcanceling statement due to user request Fpostgres.c L3070 RProcessInterrupts  
-Elapsed: 134 ms
-439565.2747252747 'query array rows per second'
+Elapsed: 14 ms
 Deleted 1000011 rows from users_copy
-29097.963142580018 'inserts per second'
-610507.326007326 'text copyTo rows per second'
-582078.5797438882 'csv copyTo rows per second'
-882623.1244483672 'binary copyTo rows per second'
+30060.120240480963 'inserts per second'
+607171.2204007286 'text copyTo rows per second'
+602416.265060241 'csv copyTo rows per second'
+901724.0757439134 'binary copyTo rows per second'
 Deleted 30000 rows from users_copy
-319492.6517571885 'binary copyFrom rows per second'
+373976.06581899774 'binary copyFrom rows per second'
 
 done
 

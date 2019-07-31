@@ -17,13 +17,13 @@ if (cluster.isMaster) {
         }
     });
 } else {
-    const { Client, ArrayReader } = require('..');
+    const { Client } = require('..');
 
     var result = 0, resolveWait;
 
     async function sessionRW(client, id, i) {
-        const {rows: [[uid, data]]} = await client.query('SELECT u.id, u.data FROM sessions_copy s, users_copy2 u WHERE s.id = $1 AND s.deleted = FALSE AND s.owner = u.id', [id], new ArrayReader());
-        await client.query('UPDATE users_copy2 SET data = $1 WHERE id = $2', [data.split('').reverse().join(''), uid]);
+        const {rows: [user]} = await client.query('SELECT u.id, u.data FROM sessions_copy s, users_copy2 u WHERE s.id = $1 AND s.deleted = FALSE AND s.owner = u.id', [id], Client.BINARY);
+        await client.query('UPDATE users_copy2 SET data = $1 WHERE id = $2', [user.data.reverse(), user.id], Client.BINARY);
         result++;
         if (result === numQueries) resolveWait();
     }
