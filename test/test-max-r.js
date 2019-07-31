@@ -1,5 +1,5 @@
 const cluster = require('cluster');
-const numCPUs = require('os').cpus().length / 2;
+const numCPUs = require('os').cpus().length * 3;
 
 if (cluster.isMaster) {
     for (let i = 0; i < numCPUs; i++) cluster.fork();
@@ -20,7 +20,7 @@ if (cluster.isMaster) {
 
     async function go() {
         const clients = [];
-        for (let i = 0; i < 10; i++) clients[i] = new Client({ user: process.env.USER, database: process.argv[2] });
+        for (let i = 0; i < Math.floor(1); i++) clients[i] = new Client({ user: process.env.USER, database: process.argv[2] });
         await Promise.all(clients.map(c => c.connect('/tmp/.s.PGSQL.5432')));
 
         let t0, result, copyResult;
@@ -28,7 +28,7 @@ if (cluster.isMaster) {
         t0 = Date.now();
         let promises = [];
         result = 0;
-        for (let i = 0; i < 100000; i++) {
+        for (let i = 0; i < 200000; i++) {
             if (i % 1000 === 999) {
                 result += (await Promise.all(promises)).length, promises = [];
                 process.stderr.write(`    ${Math.floor(1000 * numCPUs * result / (Date.now() - t0))} session Rs per second              \r`);

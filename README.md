@@ -100,57 +100,67 @@ go();
 On a 13" Macbook Pro 2018 (2.3 GHz Intel Core i5), PostgreSQL 11.3.
 
 ```bash
-$ node test.js testdb
-$ node test.js qcard
+$ node test/test.js testdb
 received 1000011 rows
-379510.8159392789 'partial query (100 rows per execute) rows per second'
+385360.6936416185 'partial query (100 rows per execute) rows per second'
 received 10000 rows
-312500 'partial query (early exit) rows per second'
+357142.85714285716 'partial query (early exit) rows per second'
 warming up 30000 / 30000     
-35087.71929824561 'random queries per second'
-604601.5719467957 'query raw rows per second'
-373138.4328358209 'query rows per second'
-385955.61559243535 'query array rows per second'
+41436.46408839779 'random queries per second'
+665786.2849533955 'query raw rows per second'
+388353.786407767 'query rows per second'
+Cancel test: 83 ERROR VERROR C57014 Mcanceling statement due to user request Fpostgres.c L3070 RProcessInterrupts  
+Elapsed: 3 ms
+444646.9542018675 'query array rows per second'
 Deleted 1000011 rows from users_copy
-40000 'inserts per second'
-487334.7953216374 'text copyTo rows per second'
-479391.65867689357 'csv copyTo rows per second'
-655745.5737704918 'binary copyTo rows per second'
+39735.09933774835 'inserts per second'
+539671.3437668645 'text copyTo rows per second'
+495791.2741695588 'csv copyTo rows per second'
+697358.4379358438 'binary copyTo rows per second'
 Deleted 30000 rows from users_copy
-218486.34476731485 'binary copyFrom rows per second'
+385509.63762528915 'binary copyFrom rows per second'
 
 done
 
 Testing SSL connection
 received 1000011 rows
-354613.829787234 'partial query (100 rows per execute) rows per second'
+364435.4956268222 'partial query (100 rows per execute) rows per second'
 received 10000 rows
-357142.85714285716 'partial query (early exit) rows per second'
+322580.6451612903 'partial query (early exit) rows per second'
 warming up 30000 / 30000     
-24711.69686985173 'random queries per second'
-630921.7665615142 'query raw rows per second'
-403067.7146311971 'query rows per second'
-450252.58892390813 'query array rows per second'
+28680.688336520077 'random queries per second'
+700778.5564120533 'query raw rows per second'
+412205.68837592745 'query rows per second'
+Cancel test: 83 ERROR VERROR C57014 Mcanceling statement due to user request Fpostgres.c L3070 RProcessInterrupts  
+Elapsed: 134 ms
+439565.2747252747 'query array rows per second'
 Deleted 1000011 rows from users_copy
-25445.29262086514 'inserts per second'
-554329.822616408 'text copyTo rows per second'
-559916.5733482643 'csv copyTo rows per second'
-823733.1136738056 'binary copyTo rows per second'
+29097.963142580018 'inserts per second'
+610507.326007326 'text copyTo rows per second'
+582078.5797438882 'csv copyTo rows per second'
+882623.1244483672 'binary copyTo rows per second'
 Deleted 30000 rows from users_copy
-260419.79166666666 'binary copyFrom rows per second'
+319492.6517571885 'binary copyFrom rows per second'
 
 done
 
-$ node test-max-rw.js testdb
-    24996 session RWs per second              
+```
+
+Simulating web session workload: Request comes in with a session id, use it to fetch user id and user data string. Update user with a modified version of the data string.
+
+The `max-r` one is just fetching a full a session row based on session id, so it's a pure read workload.
+
+```bash
+$ node test/test-max-rw.js testdb
+    29232 session RWs per second              
 done
 
-$ node test-max-r.js testdb
-    133734 session Rs per second              
+$ node test/test-max-r.js testdb
+    119673 session Rs per second              
 done
 ```
 
-On a 16-core server with 64 GB RAM and Optane. (NB the `numCPUs` and connections per CPU have been tuned.)
+On a 16-core server, 2xE5-2650v2, 64 GB ECC DDR3 and Optane. (NB the `numCPUs` and connections per CPU have been tuned.)
 
 ```bash
 $ node test/test-max-rw.js testdb
@@ -162,7 +172,7 @@ $ node test/test-max-r.js testdb
 done
 ```
 
-On a 16-core server faster CPU, 32 GB RAM and flash SSD.
+On a 16-core workstation, TR 2950X, 32 GB ECC DDR4 and flash SSD.
 
 ```bash
 $ node test/test-max-rw.js testdb
@@ -170,16 +180,21 @@ $ node test/test-max-rw.js testdb
 done
 
 $ node test/test-max-r.js testdb
-    547336 session Rs per second              
+    750755 session Rs per second              
 done
 ```
 
-Running server on one 16-core machine, client on another.
+Running server on the Optane 16-core machine, doing requests over the network from the other 16-core machine.
 
 ```bash
 $ node test/test-max-rw.js testdb
     101201 session RWs per second              
 done
+
+$ node test/test-max-r.js testdb
+    496499 session Rs per second               
+done
+
 ```
 
 ## Author
