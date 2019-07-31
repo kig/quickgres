@@ -11,13 +11,11 @@ function w16(buf, v, off) { buf[off]=(v>>8)&255; buf[off+1]=v&255; return off+2;
 
 class Client {
     constructor(config) {
-        assert(config.user, "No 'user' defined in config");
-        assert(config.database, "No 'database' defined in config");
+        assert(config.user && config.database, "You need to provide both 'user' and 'database' in config");
         this._parsedStatementCount = 1;
         this._parsedStatements = {};
         this._packet = { buf: Buffer.alloc(2**16), head: Buffer.alloc(4), cmd: 0, len: 0, idx: 0 };
         this._outStreams = [];
-        this.authenticationOk = false;
         this.serverParameters = {};
         this.config = config;
     }
@@ -121,14 +119,11 @@ class Client {
             if (outStream) outStream.resolve(outStream.stream);
             break;
         case 69: // E -- Error
-            const fieldType = buf[off]; ++off;
-            const string = buf.toString('utf8', off, off + length - 5);
             this._outStreams[0] = null; // Error is followed by ReadyForQuery, this will eat that.
-            if (outStream) outStream.reject(Error(fieldType + ' ' + string.split('\0').join(" ")));
+            if (outStream) outStream.reject(Error(`${buf[off]} ${buf.toString('utf8', off+1, off+length-4).replace(/\0/g, ' ')}`));
             break;
         case 83: // S -- ParameterStatus
-            const kv = buf.toString('utf8', off, off + length - 5)
-            const [key, value] = kv.split('\0');
+            const [key, value] = buf.toString('utf8', off, off + length - 5).split('\0');
             this.serverParameters[key] = value;
             break;
         case 82: // R -- Authentication
