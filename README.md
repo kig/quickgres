@@ -36,6 +36,7 @@ async function go() {
     const client = new Client({ user: 'myuser', database: 'mydb', password: 'mypass' });
     await client.connect('/tmp/.s.PGSQL.5432'); // Connect to a UNIX socket.
     // await client.connect(5432, 'localhost'); // Connect to a TCP socket.
+    // await client.connect(5432, 'localhost', {}); // Connect to a TCP socket with SSL config (see tls.connect).
     console.error(client.serverParameters);
 
     // Access row fields as object properties.
