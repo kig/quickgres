@@ -151,75 +151,81 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
             console.error(cmd, String.fromCharCode(cmd), length, buf.toString('utf8', off, off + length - 4)); // Log the command to stderr.
             this.end(); throw(Error('Unknown message. Protocol state unknown, exiting.')); // Terminate connection and bail out.
     } }
-    promise(stream, parsed) { return new Promise((resolve, reject) => this._queryHandlers.push({stream, parsed, resolve, reject})); }
-    parseAndDescribe(statementName, statement, types=[]) {
-        const strBuf = Buffer.from(`${statementName}\0${statement}\0`);
-        const len = 7 + strBuf.byteLength + types.length*4;
-        if (len > 2**31) throw Error("Query string too large");
-        const describeBuf = Buffer.from(`S${statementName}\0`);
-        const msg = Buffer.allocUnsafe(len + 5 + describeBuf.byteLength);
-        let off = 0;
-        msg[off++] = 80; // P -- Parse
-        off = w32(msg, len - 1, off);
-        off += strBuf.copy(msg, off);
-        off = w16(msg, types.length, off);
-        for (let i = 0; i < types.length; i++) off = w32(msg, types[i], off);
-        msg[off++] = 68; // D -- Describe
-        off = w32(msg, describeBuf.byteLength+4, off);
-        off += describeBuf.copy(msg, off);
-        this._connection.write(msg);
+    promise(stream, parsed) { return new Promise((resolve, reject) => this._queryHandlers.push({stream, parsed, resolve, reject})); } // Create a new query handler for current query.
+    parseAndDescribe(statementName, statement, types=[]) { // Parses a query string and requests a query results description. Rolled into a single write for performance.
+        const strBuf = Buffer.from(`${statementName}\0${statement}\0`); // Create a buffer from the query string and the prepared statement name.
+        const len = 7 + strBuf.byteLength + types.length*4; // Calculate the length of the parse message buffer.
+        if (len > 2**31) throw Error("Query string too large"); // Individual PostgreSQL messages can't be larger than two gigabytes.
+        const describeBuf = Buffer.from(`S${statementName}\0`); // Create a buffer for the statement describe message.
+        const msg = Buffer.allocUnsafe(len + 5 + describeBuf.byteLength); // Allocate a buffer to contain both the parse and the describe messages.
+        let off = 0; // Keep track of where we are in the message buffer.
+        msg[off++] = 80; // P -- Parse -- Write parse command to the start of the message.
+        off = w32(msg, len - 1, off); // Next comes the length of the parse message, minus the command byte.
+        off += strBuf.copy(msg, off); // Then the name of the statement, followed by the statement text.
+        off = w16(msg, types.length, off); // Finally, the types of the query parameters. First the number of types.
+        for (let i = 0; i < types.length; i++) off = w32(msg, types[i], off); // Followed by the the type OIDs
+        msg[off++] = 68; // D -- Describe -- After the parse command, we add the describe message.
+        off = w32(msg, describeBuf.byteLength+4, off); // The length of the describe message is describeBuf plus four bytes for the length i32.
+        off += describeBuf.copy(msg, off); // After the length comes one byte to select Statement or Portal, then the name of the statement or portal to describe.
+        this._connection.write(msg); // Both commands done, send them to the server in a single write.
     }
-    _writeExecuteBuf(wbuf, nameBuf, maxRows, off) {
-        wbuf[off++] = 69; // E -- Execute
-        off = w32(wbuf, nameBuf.byteLength + 8, off);
-        off += nameBuf.copy(wbuf, off);
-        off = w32(wbuf, maxRows, off);
-        return off;
+    _writeExecuteBuf(msg, portalNameBuf, maxRows, off) { // Writes an Execute message to the msg buffer at given offset off.
+        msg[off++] = 69; // E -- Execute
+        off = w32(msg, portalNameBuf.byteLength + 8, off); // The Execute message body is i32 length, portal name, and i32 maxRows
+        off += portalNameBuf.copy(msg, off); // After the length, comes the name of the portal to execute.
+        off = w32(msg, maxRows, off); // At the end of the Execute message is the maximum number of result rows to return. Use zero to return all rows.
+        return off; // Return the offset after the Execute message.
     }
-    _bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats) {
-        let bytes = portalNameBuf.byteLength + statementNameBuf.byteLength;
-        if (values.buf) return (6 + (valueFormats.length * 2) + bytes + values.buf.byteLength);
-        else for (let i = 0; i < values.length; i++) if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength;
-        return (13 + (valueFormats.length * 2) + (values.length * 4) + bytes);
+    _bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats) { // Calculates the length of a Bind message and converts values to Buffers where needed.
+        let bytes = portalNameBuf.byteLength + statementNameBuf.byteLength; // Add up all the buffer lengths here.
+        if (values.buf) return (6 + (valueFormats.length * 2) + bytes + values.buf.byteLength); // Row from a RowParser. Copy it directly. 13B - 2B value count - 5B values.buf header + values.buf + value formats * 2B + bytes
+        else for (let i = 0; i < values.length; i++) if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength; // Convert non-null values to buffers and add their byteLength to total number of bytes.
+        return (13 + (valueFormats.length * 2) + (values.length * 4) + bytes); // 5B header + 2B value format count as i16 + 2B value count + 2B response format count + 2B single response format + bytes + values * i32 + valueFormats * i16
     }
-    _writeBindBuf(wbuf, portalNameBuf, statementNameBuf, values, valueFormats, format) {
-        let off = 5; wbuf[0] = 66; // B -- Bind
-        off += portalNameBuf.copy(wbuf, off);
-        off += statementNameBuf.copy(wbuf, off);
-        off = w16(wbuf, valueFormats.length, off);
-        for (let i = 0; i < valueFormats.length; i++) off = w16(wbuf, valueFormats[i], off);
-        if (values.buf) off += values.buf.copy(wbuf, off, 5);
-        else {
-            off = w16(wbuf, values.length, off);
-            for (let i = 0; i < values.length; i++) {
-                if (values[i] === null) off = w32(wbuf, -1, off);
-                else off = w32(wbuf, values[i].byteLength, off), off += values[i].copy(wbuf, off);
+    _writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, offset) { // Write a Bind message to the msg buffer, starting at the given offset.
+        let off = offset + 5; msg[offset] = 66; // B -- Bind -- Write Bind command at the start of the message. Skip off to after the message header.
+        off += portalNameBuf.copy(msg, off); // The Bind message starts with the portal name.
+        off += statementNameBuf.copy(msg, off); // Followed by the statement name. Both are terminated by null bytes.
+        off = w16(msg, valueFormats.length, off); // After the names are the formats of the query parameters, this is an array of i16s where 0 means string and 1 means binary. Zero-length array sets everything to string, single element array sets everything to the element format.
+        for (let i = 0; i < valueFormats.length; i++) off = w16(msg, valueFormats[i], off); // Write the parameter formats. Multiple element array can set different format for each parameter.
+        if (values.buf) off += values.buf.copy(msg, off, 5); // If we're dealing with a row from a RowParser, copy its body to the message.
+        else { // Otherwise go through the values and write them out.
+            off = w16(msg, values.length, off); // The values array starts with a i16 length.
+            for (let i = 0; i < values.length; i++) { // And is followed by a i32 length and a payload for each element.
+                if (values[i] === null) off = w32(msg, -1, off); // Null values have a length of -1 and no payload.
+                else off = w32(msg, values[i].byteLength, off), off += values[i].copy(msg, off); // Other values have a length followed by the value bytes.
             }
         }
-        off = w16(wbuf, 1, off);
-        off = w16(wbuf, format ? 1 : 0, off);
-        w32(wbuf, off-1, 1);
-        return off;
+        off = w16(msg, 1, off); // Write a single-element response format array, meaning we want all query result columns in the same format.
+        off = w16(msg, format, off); // Write the result format. 0 for string, 1 for binary.
+        w32(msg, off-offset-1, offset+1); // Write the length of the bind message in the message header.
+        return off; // Return the offset after the bind message.
     }
     bind(portalName, statementName, values=[], format=Client.STRING) {
         const valueFormats = [];
         if (values.buf) valueFormats.push(values.format);
-        else for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0;
+        else {
+            values = values.slice(); // Copy the values array so that we can replace the values with write buffers.
+            for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a buffer, treat it as a binary PostgreSQL value.
+        }
         const portalNameBuf = Buffer.from(portalName + '\0');
         const statementNameBuf = Buffer.from(statementName + '\0');
         const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats));
-        this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format);
+        this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, 0);
         this._formatQueue.push(format);
         this._connection.write(msg);
     }
     bindExecuteSync(portalName, statementName, maxRows=0, values=[], format=Client.STRING) {
         const valueFormats = [];
         if (values.buf) valueFormats.push(values.format);
-        else for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0;
+        else {
+            values = values.slice(); // Copy the values array so that we can replace the values with write buffers.
+            for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a buffer, treat it as a binary PostgreSQL value.
+        }
         const portalNameBuf = Buffer.from(portalName + '\0');
         const statementNameBuf = Buffer.from(statementName + '\0');
         const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats) + 14 + portalNameBuf.byteLength);
-        let off = this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format);
+        let off = this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, 0);
         off = this._writeExecuteBuf(msg, portalNameBuf, maxRows, off);
         msg[off] = 83; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // S -- Sync
         this._formatQueue.push(format);
