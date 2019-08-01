@@ -70,11 +70,11 @@ function randomString() {
 }
 
 module.exports = async function runTest(client) {
-    let t0, result, copyResult;
+    let t0, result, copyResult, ws;
     let promises = [], count = 0;
 
     { // README examples
-        console.error(client.serverParameters);
+        assert(client.serverParameters.server_encoding, "Server parameters didn't receive an encoding");
 
         // Access row fields as object properties.
         let { rows, rowCount } = await client.query(
@@ -85,14 +85,16 @@ module.exports = async function runTest(client) {
         // You can also convert the row into an object or an array.
         assert(rows[0].toObject().name === rows[0].toArray()[0]);
 
+        ws = require('fs').createWriteStream('/dev/null');
         // Stream raw query results protocol to stdout (why waste cycles on parsing data...)
         await client.query(
             'SELECT name, email FROM users WHERE id = $1', 
             ['adb42e46-d1bc-4b64-88f4-3e754ab52e81'], 
             Client.STRING, // Or Client.BINARY. Controls the format of data that PostgreSQL sends you.
             true, // Cache the parsed query (default is true. If you use the query text only once, set this to false.)
-            process.stdout // The result stream. Client calls stream.write(buffer) on this. See ObjectReader for details.
+            ws // The result stream. Client calls stream.write(buffer) on this. See ObjectReader for details.
         );
+        ws.end();
 
         // Binary data
         const buf = Buffer.from([0,1,2,3,4,5,255,254,253,252,251,0]);
@@ -191,6 +193,14 @@ module.exports = async function runTest(client) {
     result = null;
 
     await testProtocolState(client);
+    ws = require('fs').createWriteStream('test.dat');
+    t0 = Date.now();
+    result = await client.query('SELECT * FROM users', [], Client.BINARY, true, ws);
+    await ws.end();
+    console.error(1000 * 1000011 / (Date.now() - t0), 'binary query rows per second piped to test.dat');
+    result = null;
+
+    await testProtocolState(client);
     t0 = Date.now();
     result = await client.query('SELECT * FROM users', []);
     console.error(1000 * result.rows.length / (Date.now() - t0), 'query rows per second');
@@ -216,7 +226,12 @@ module.exports = async function runTest(client) {
     t0 = Date.now();
     result = await client.query('SELECT * FROM users', [], Client.BINARY);
     console.error(1000 * result.rows.length / (Date.now() - t0), 'binary query rows per second');
+    result = Buffer.concat(result.rows.map(r => r.buf));
+    let readBack = require('fs').readFileSync('test.dat');
+    for (let i = 0; i < result.byteLength; i++) if (result[i] !== readBack[i]) throw(Error("inequality " + i));
+    readBack = null;
     result = null;
+    require('fs').unlinkSync('test.dat');
 
     await testProtocolState(client);
     t0 = Date.now();
@@ -291,7 +306,7 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     t0 = Date.now();
-    result = await client.copy('COPY users TO STDOUT (FORMAT binary)');
+    result = await client.copy('COPY users TO STDOUT (FORMAT binary)', [], Client.BINARY);
     console.error(1000 * result.rows.length / (Date.now() - t0), 'binary copyTo rows per second');
     // console.error(result.rows[0]);
     copyResult = result;
@@ -302,7 +317,7 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     t0 = Date.now();
-    let copyIn = await client.copy('COPY users_copy FROM STDIN (FORMAT binary)');
+    let copyIn = await client.copy('COPY users_copy FROM STDIN (FORMAT binary)', [], Client.BINARY);
     for (let i = 0; i < copyResult.rows.length; i += 1000) {
         const chunk = Buffer.concat(copyResult.rows.slice(i, i + 1000));
         client.copyData(chunk);

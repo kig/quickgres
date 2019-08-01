@@ -75,7 +75,7 @@ class Client {
                 packet.head[packet.index++] = buf[i++];
                 if (packet.index === 4) {
                     packet.length = r32(packet.head, 0);
-                    packet.buf = packet.buf.byteLength >= packet.length + 1 ? packet.buf : Buffer.allocUnsafe(packet.length + 1);
+                    packet.buf = Buffer.allocUnsafe(packet.length + 1);
                     packet.buf[0] = packet.cmd; 
                     packet.buf[1] = packet.head[0]; packet.buf[2] = packet.head[1]; packet.buf[3] = packet.head[2]; packet.buf[4] = packet.head[3];
                 }
@@ -95,23 +95,23 @@ class Client {
         case 68: // D -- DataRow
             outStream.stream.format = this._formatQueue[0];
             outStream.stream.rowParser = outStream.parsed.rowParser;
-            outStream.stream.write(buf.slice(0, length+1));
+            outStream.stream.write(buf);
             break;
         case 100: // CopyData
-            outStream.stream.write(buf.slice(0, length+1));
+            outStream.stream.write(buf);
             break;
         case 84: // T -- RowDescription
             outStream.parsed.rowParser = new RowParser(buf);
         case 73: case 72: case 99: // EmptyQueryResponse / CopyOutResponse / CopyDone
-            outStream.stream.write(buf.slice(0, length+1));
+            outStream.stream.write(buf);
         case 110: case 116: case 49: case 50: case 51: // NoData / ParameterDescription / {Parse,Bind,Close}Complete
             break;
         case 67: // C -- CommandComplete
             if (this.inQuery) this.zeroParamCmd(83); // S -- Sync
-            outStream.stream.write(buf.slice(0, length+1));
+            outStream.stream.write(buf);
             break;
         case 115: case 71: case 87: // PortalSuspended / CopyInResponse / CopyBothResponse
-            outStream.stream.write(buf.slice(0, length+1));
+            outStream.stream.write(buf);
             this._outStreams.shift();
             outStream.resolve(outStream.stream);
             break;
@@ -293,7 +293,7 @@ Client.BINARY = 1;
 class RowReader {
     constructor() { this.rows = [], this.cmd = this.oid = this.format = this.rowParser = undefined, this.rowCount = 0; }
     write(buf) { switch(buf[0]) {
-        case 68: return this.rows.push(new (this.rowParser[this.format])(Buffer.from(buf))); // D -- DataRow
+        case 68: return this.rows.push(new (this.rowParser[this.format])(buf)); // D -- DataRow
         case 67: // C -- CommandComplete
             const str = buf.toString('utf8', 5, 1 + r32(buf, 1));
             const [_, cmd, oid, rowCount] = str.match(/^(\S+)( \d+)?( \d+)\u0000/) || str.match(/^([^\u0000]*)\u0000/);
@@ -304,7 +304,7 @@ class RowReader {
 }
 class CopyReader extends RowReader {
     write(buf, off=0) { switch(buf[off++]) {
-        case 100: return this.rows.push(Buffer.from(buf.slice(off+4, off + r32(buf, off)))); // CopyData
+        case 100: return this.rows.push(buf.slice(off+4, off + r32(buf, off))); // CopyData
         case 99: return this.cmd = 'COPY'; // CopyDone
         case 71: case 87: case 72: // Copy{In,Both,Out}Response
             this.format = buf[off+4]; off += 5;
@@ -393,7 +393,6 @@ class RowParser {
             Object.defineProperty(this.StringRow.prototype, f.name, getter);
             Object.defineProperty(this.StringRow.prototype, index, getter);
         });
-
         this[Client.BINARY] = this.BinaryRow;
         this[Client.STRING] = this.StringRow;
     }
