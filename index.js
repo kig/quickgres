@@ -1,68 +1,64 @@
 // Quickgres is a PostgreSQL client library.
-const net = require('net');
-const tls = require('tls');
-const crypto = require('crypto');
-const assert = require('assert');
+const net = require('net'); // net is required for opening socket connections
+const tls = require('tls'); // tls is required for creating encrypted SSL connections
+const crypto = require('crypto'); // md5 password hashing uses the crypto lib
 
-function r32(buf, off){ return (buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3]; }
-function r16(buf, off){ return (buf[off] << 8) | buf[off+1]; }
-function w32(buf, v, off) { buf[off]=(v>>24)&255; buf[off+1]=(v>>16)&255; buf[off+2]=(v>>8)&255; buf[off+3]=v&255; return off+4; }
-function w16(buf, v, off) { buf[off]=(v>>8)&255; buf[off+1]=v&255; return off+2;}
+function r32(buf, off){ return (buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3]; } // Read a 32-bit big-endian int from buffer buf at offset off.
+function r16(buf, off){ return (buf[off] << 8) | buf[off+1]; } // Read a 16-bit big-endian int from buffer buf at offset off.
+function w32(buf, v, off) { buf[off]=(v>>24)&255; buf[off+1]=(v>>16)&255; buf[off+2]=(v>>8)&255; buf[off+3]=v&255; return off+4; } // Write a 32-bit big-endian int to buffer at offset and return the offset after it.
+function w16(buf, v, off) { buf[off]=(v>>8)&255; buf[off+1]=v&255; return off+2;} // Write a 16-bit big-endian int to buffer at offset and return the offset after it.
 
-class Client {
-    constructor(config) {
-        assert(config.user && config.database, "You need to provide both 'user' and 'database' in config");
-        this._parsedStatementCount = 1;
-        this._parsedStatements = {};
-        this._packet = { buf: Buffer.alloc(2**16), head: Buffer.alloc(4), cmd: 0, len: 0, idx: 0 };
-        this._outStreams = [];
-        this._formatQueue = [];
-        this.serverParameters = {};
-        this.config = config;
+class Client { // The Client class wraps a connection socket to a PostgreSQL database and speaks the protocol.
+    constructor(config) { // Client constructor takes a config object that contains parameters to pass to the server.
+        if (!(config.user && config.database)) throw Error("You need to provide both 'user' and 'database' in config"); // PostgreSQL protocol requires at least a user and database.
+        this._parsedStatementCount = 1; // Counter to create unique prepared statement names.
+        this._parsedStatements = {}; // Index to store prepared statements. Maps from a query string to statement name and row parser.
+        this._packet = { buf: null, head: Buffer.alloc(4), cmd: 0, length: 0, idx: 0 }; // Stores the current incoming protocol message.
+        this._outStreams = []; // Internal queue of query result handlers, called in order when receiving query results.
+        this._formatQueue = []; // Internal queue of query result formats, either Client.STRING or Client.BINARY.
+        this.serverParameters = {}; // Parameters received from the PostgreSQL server on connecting. Stuff like {server_encoding: 'UTF8'}
+        this.config = config; // Store the config for later use.
     }
-    connect(address, host) {
-        this.address = address, this.host = host;
-        this._connect();
-        return this.promise(null, null);
+    connect(address, host, ssl) { // Connects to either a UNIX socket or a TCP socket, with optional SSL encryption. See Node.js net.createConnection.
+        this.address = address, this.host = host, this.ssl = ssl; // Store the connection parameters for later use.
+        this._connect(); // Connect using the parameters.
+        return this.promise(null, null); // Wait for the initial ReadyForQuery message.
     }
-    _connect() {
-        this._connection = net.createConnection(this.address, this.host);
-        this._connection.once('connect', this.onInitialConnect.bind(this));
-        this._connection.on('error', this.onError.bind(this));
+    _connect() { // Internal connect helper, creates connection based on connection parameters.
+        this._connection = net.createConnection(this.address, this.host); // Create net socket.
+        this._connection.on('error', this.onError.bind(this)); // Deal with errors on the net socket.
+        this._connection.once('connect', () => { // Upgrade to SSL on connection if wanted.
+            if (this.ssl) { // We have ssl config, try to establish an SSL connection.
+                this._connection.once('data', (buffer) => { // Deal with the server's response to our SSL request.
+                    if (buffer[0] !== 83) throw Error("Error establishing an SSL connection"); // Error out if the server doesn't allow for SSL.
+                    this._connection = tls.connect({socket: this._connection, ...this.ssl}, this.onConnect.bind(this)); // OK, upgrade to an SSL socket and make it handle the protocol.
+                    this._connection.on('error', this.onError.bind(this)); // We also need to handle errors in the SSL connection.
+                });
+                this._connection.write(Buffer.from([0,0,0,8,4,210,22,47])); // Request SSL from the server
+            } else this.onConnect(); // Proceed with an unencrypted connection.
+        });
     }
-    end() { 
-        this.terminate();
-        return this._connection.end();
+    end() { // Ends the connection by terminating the PostgreSQL protocol and disconnecting.
+        this.terminate(); // Send terminate message to the server.
+        return this._connection.destroy(); // Disconnect socket.
     }
-    onError(err) {
-        if (err.message.startsWith('connect EAGAIN ')) this._connect();
-        else this._outStreams.splice(0).forEach(s => s.reject(err));
+    onError(err) { // Deal with errors in the connection.
+        if (err.message.startsWith('connect EAGAIN ')) this._connect(); // If you try to open too many UNIX sockets too quickly, the Linux syscall sends an EAGAIN interrupt asking you to try again.
+        else this._formatQueue.splice(0), this._outStreams.splice(0).forEach(s => s.reject(err)); // Clear out the query result handlers and reject them all. 
     }
-    onInitialConnect() {
-        if (this.config.ssl) {
-            this._connection.once('data', this.onSSLResponse.bind(this));
-            this._connection.write(Buffer.from([0,0,0,8,4,210,22,47])); // SSL Request
-        } else this.onConnect();
-    }
-    onSSLResponse(buffer) {
-        if (buffer[0] !== 83) throw Error("Error establishing an SSL connection");
-        this._connection = tls.connect({socket: this._connection, ...this.config.ssl}, this.onConnect.bind(this));
-        this._connection.on('error', this.onError.bind(this));
-    }
-    onConnect() {
-        if (this.config.cancel) {
-            this._connection.write(Buffer.concat([Buffer.from([0,0,0,16,4,210,22,46]), this.config.cancel])); // CancelRequest
-            this._connection.destroy();
-            return this._outStreams[0].resolve();
+    onConnect() { // Initiate connection with PostgreSQL server by sending the startup packet.
+        if (this.config.cancel) { // Unless this connection is for canceling a long-running request.
+            this._connection.write(Buffer.concat([Buffer.from([0,0,0,16,4,210,22,46]), this.config.cancel])); // Send a CancelRequest with our backendKey cancel token.
+            this._connection.destroy(); // Disconnect socket.
+            return this._outStreams[0].resolve(); // Tell the cancel promise that we're done here.
         }
-        this._connection.on('data', this.onData.bind(this));
-        let chunks = [Buffer.from([0,0,0,0,0,3,0,0])]; // Protocol version 3.0
-        const filteredKeys = {password: 1, ssl: 1};
-        for (let n in this.config) if (!filteredKeys[n]) chunks.push(Buffer.from(`${n}\0${this.config[n]}\0`));
-        chunks.push(Buffer.alloc(1));
-        const msg = Buffer.concat(chunks);
-        w32(msg, msg.byteLength, 0);
-        this._connection.write(msg);
+        let chunks = [Buffer.from([0,0,0,0,0,3,0,0])]; // Startup message for protocol version 3.0, we fill in the first four message-length bytes later.
+        for (let n in this.config) if (n !== 'password') chunks.push(Buffer.from(`${n}\0${this.config[n]}\0`)); // Send config params to the server, except for the password. It is handled in the Authentication flow.
+        chunks.push(Buffer.alloc(1)); // Send a zero byte to tell the server that there are no more config params.
+        const msg = Buffer.concat(chunks); // Turn the chunks into one big message buffer.
+        w32(msg, msg.byteLength, 0); // Write the length of the message at the beginning of the message.
+        this._connection.write(msg); // Send the startup message to the server.
+        this._connection.on('data', this.onData.bind(this)); // Start listening to what the server is saying.
     }
     onData(buf) {
         const packet = this._packet;
@@ -85,15 +81,15 @@ class Client {
                 packet.index += copiedBytes;
                 i += copiedBytes;
                 if (packet.index === packet.length) {
-                    this.processPacket(packet.buf, packet.cmd, packet.length, 5, this._outStreams[0]);
+                    this.processPacket(packet.buf, packet.cmd, packet.length, 5, this._outStreams[0], this._formatQueue[0]);
                     packet.cmd = 0;
                 }
             }
         }
     }
-    processPacket(buf, cmd, length, off, outStream) { switch(cmd) {
+    processPacket(buf, cmd, length, off, outStream, streamFormat) { switch(cmd) {
         case 68: // D -- DataRow
-            outStream.stream.format = this._formatQueue[0];
+            outStream.stream.format = streamFormat;
             outStream.stream.rowParser = outStream.parsed.rowParser;
             outStream.stream.write(buf);
             break;
@@ -111,9 +107,9 @@ class Client {
             outStream.stream.write(buf);
             break;
         case 115: case 71: case 87: // PortalSuspended / CopyInResponse / CopyBothResponse
-            outStream.stream.write(buf);
-            this._outStreams.shift();
-            outStream.resolve(outStream.stream);
+            outStream.stream.write(buf); // Pass the results to either query.getResult stream or CopyIn stream.
+            this._outStreams.shift(); // Advance _outStreams (note that the streamFormat is still valid so we don't shift _formatQueue).
+            outStream.resolve(outStream.stream); // Resolve the partial query or CopyInResponse promise.
             break;
         case 90: // Z -- ReadyForQuery
             this.inQuery = null;
@@ -123,7 +119,7 @@ class Client {
             break;
         case 69: // E -- Error
             this._outStreams[0] = null; // Error is followed by ReadyForQuery, this will eat that.
-            this._formatQueue[0] = null;
+            this._formatQueue[0] = null; // Format needs to be eaten too.
             if (outStream) outStream.reject(Error(`${buf[off]} ${buf.toString('utf8', off+1, off+length-4).replace(/\0/g, ' ')}`));
             break;
         case 83: // S -- ParameterStatus
@@ -134,10 +130,10 @@ class Client {
             const authResult = r32(buf, off); off += 4;
             if (authResult === 0) this.authenticationOk = true;
             else if (authResult === 3) { // 3 -- AuthenticationCleartextPassword
-                assert(this.config.password !== undefined, "No password supplied");
+                if (this.config.password === undefined) throw Error("No password supplied");
                 this.authResponse(Buffer.from(this.config.password + '\0')); 
             } else if (authResult === 5) { // 5 -- AuthenticationMD5Password
-                assert(this.config.password !== undefined, "No password supplied");
+                if (this.config.password === undefined) throw Error("No password supplied");
                 const upHash = crypto.createHash('md5').update(this.config.password).update(this.config.user).digest('hex');
                 const salted = crypto.createHash('md5').update(upHash).update(buf.slice(off, off+4)).digest('hex');
                 this.authResponse(Buffer.from(`md5${salted}\0`)); 
@@ -164,7 +160,7 @@ class Client {
     parseAndDescribe(statementName, statement, types=[]) {
         const strBuf = Buffer.from(`${statementName}\0${statement}\0`);
         const len = 7 + strBuf.byteLength + types.length*4;
-        assert(len <= 2**31, "Query string too large");
+        if (len > 2**31) throw Error("Query string too large");
         const describeBuf = Buffer.from(`S${statementName}\0`);
         const msg = Buffer.allocUnsafe(len + 5 + describeBuf.byteLength);
         let off = 0;
@@ -286,7 +282,7 @@ class Client {
         return this.promise(stream, null);
     } 
     sync(stream=new RowReader()) { this.zeroParamCmd(83); return this.promise(stream, null); }
-    cancel() { return new Client({...this.config, cancel: this.backendKey}).connect(this.address, this.host); }
+    cancel() { return new Client({...this.config, cancel: this.backendKey}).connect(this.address, this.host, this.ssl); }
 }
 Client.STRING = 0;
 Client.BINARY = 1;
@@ -315,7 +311,7 @@ class CopyReader extends RowReader {
 }
 class RowParser {
     constructor(buf, off=0) {
-        this.columns = [], this.columnNames = [];
+        this.buf = buf, this.off = off, this.columns = [], this.columnNames = [];
         const columnCount = r16(buf, off+5); off += 7;
         for (let i = 0; i < columnCount; i++) {
             const nameEnd =  buf.indexOf(0, off);
