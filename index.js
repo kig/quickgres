@@ -24,7 +24,11 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         this._connect(); // Connect using the parameters.
         return this.promise(null, null); // Wait for the initial ReadyForQuery message.
     }
-    _connect() { // Internal connect helper, creates connection based on connection parameters.
+    end() { // Ends the connection by terminating the PostgreSQL protocol and disconnecting.
+        this.zeroParamCmd(88); // X -- Terminate -- Send terminate message to the server.
+        return this._connection.destroy(); // Disconnect socket.
+    }
+    _connect() { // Internal connect helper, creates a connection based on connection parameters.
         this._connection = net.createConnection(this.address, this.host); // Create net socket.
         this._connection.on('error', this.onError.bind(this)); // Deal with errors on the net socket.
         this._connection.once('connect', () => { // Upgrade to SSL on connection if wanted.
@@ -37,10 +41,6 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
                 this._connection.write(Buffer.from([0,0,0,8,4,210,22,47])); // Request SSL from the server
             } else this.onConnect(); // Proceed with an unencrypted connection.
         });
-    }
-    end() { // Ends the connection by terminating the PostgreSQL protocol and disconnecting.
-        this.terminate(); // Send terminate message to the server.
-        return this._connection.destroy(); // Disconnect socket.
     }
     onError(err) { // Deal with errors in the connection.
         if (err.message.startsWith('connect EAGAIN ')) this._connect(); // If you try to open too many UNIX sockets too quickly, the Linux syscall sends an EAGAIN interrupt asking you to try again.
@@ -176,7 +176,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         off = w32(msg, maxRows, off); // At the end of the Execute message is the maximum number of result rows to return. Use zero to return all rows.
         return off; // Return the offset after the Execute message.
     }
-    _bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats) { // Calculates the length of a Bind message and converts values to Buffers where needed.
+    _prepareBindValues(portalNameBuf, statementNameBuf, values, valueFormats) { // Calculates the length of a Bind message and converts values to Buffers where needed.
         let bytes = portalNameBuf.byteLength + statementNameBuf.byteLength; // Add up all the buffer lengths here.
         if (values.buf) return (6 + (valueFormats.length * 2) + bytes + values.buf.byteLength); // Row from a RowParser. Copy it directly. 13B - 2B value count - 5B values.buf header + values.buf + value formats * 2B + bytes
         else for (let i = 0; i < values.length; i++) if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength; // Convert non-null values to buffers and add their byteLength to total number of bytes.
@@ -201,107 +201,102 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         w32(msg, off-offset-1, offset+1); // Write the length of the bind message in the message header.
         return off; // Return the offset after the bind message.
     }
-    bind(portalName, statementName, values=[], format=Client.STRING) {
-        const valueFormats = [];
-        if (values.buf) valueFormats.push(values.format);
-        else {
-            values = values.slice(); // Copy the values array so that we can replace the values with write buffers.
-            for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a buffer, treat it as a binary PostgreSQL value.
+    bind(portalName, statementName, values=[], format=Client.STRING) { // Bind the parameters to a query. Return the results in the given format. 
+        const valueFormats = []; // Value formats tell PostgreSQL if we're giving it strings or binary data.
+        if (values.buf) valueFormats.push(values.format); // When called with a row, use its format as the parameter format.
+        else { // Otherwise parse the values array.
+            values = values.slice(); // Copy the values array so that we can replace the values with Buffer versions.
+            for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a Buffer, treat it as a binary PostgreSQL value.
         }
-        const portalNameBuf = Buffer.from(portalName + '\0');
-        const statementNameBuf = Buffer.from(statementName + '\0');
-        const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats));
-        this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, 0);
-        this._formatQueue.push(format);
-        this._connection.write(msg);
+        const portalNameBuf = Buffer.from(portalName + '\0'); // Turn the portalName string into a null-terminated C string.
+        const statementNameBuf = Buffer.from(statementName + '\0'); // Ditto for the statementName string.
+        const msg = Buffer.allocUnsafe(this._prepareBindValues(portalNameBuf, statementNameBuf, values, valueFormats)); // Allocate a message buffer for the bind, converting values to buffers where needed.
+        this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, 0); // Write the bind message to the message buffer.
+        this._formatQueue.push(format); // Push the query format to the format queue so that queryHandlers know how to handle the data they receive.
+        this._connection.write(msg); // Send the bind message to the server.
     }
-    bindExecuteSync(portalName, statementName, maxRows=0, values=[], format=Client.STRING) {
-        const valueFormats = [];
-        if (values.buf) valueFormats.push(values.format);
-        else {
-            values = values.slice(); // Copy the values array so that we can replace the values with write buffers.
-            for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a buffer, treat it as a binary PostgreSQL value.
+    bindExecuteSync(portalName, statementName, maxRows=0, values=[], format=Client.STRING) { // Bind the parameters to a query, execute it and sync, using a single write. Return the results in the given format. 
+        const valueFormats = []; // Value formats tell PostgreSQL if we're giving it strings or binary data.
+        if (values.buf) valueFormats.push(values.format); // When called with a row, use its format as the parameter format.
+        else { // Otherwise parse the values array.
+            values = values.slice(); // Copy the values array so that we can replace the values with Buffer versions.
+            for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a Buffer, treat it as a binary PostgreSQL value.
         }
-        const portalNameBuf = Buffer.from(portalName + '\0');
-        const statementNameBuf = Buffer.from(statementName + '\0');
-        const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats) + 14 + portalNameBuf.byteLength);
-        let off = this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, 0);
-        off = this._writeExecuteBuf(msg, portalNameBuf, maxRows, off);
-        msg[off] = 83; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // S -- Sync
-        this._formatQueue.push(format);
-        this._connection.write(msg);
+        const portalNameBuf = Buffer.from(portalName + '\0'); // Turn the portalName string into a null-terminated C string.
+        const statementNameBuf = Buffer.from(statementName + '\0'); // Ditto for the statementName string.
+        const msg = Buffer.allocUnsafe(this._prepareBindValues(portalNameBuf, statementNameBuf, values, valueFormats) + 14 + portalNameBuf.byteLength);
+        let off = this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, 0); // Write the bind message to the message buffer.
+        off = this._writeExecuteBuf(msg, portalNameBuf, maxRows, off); // Write the execute message to the message buffer after the bind.
+        msg[off] = 83; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // S -- Sync -- Write a sync message to the end of the message buffer.
+        this._formatQueue.push(format); // Push the query format to the format queue so that queryHandlers know how to handle the data they receive.
+        this._connection.write(msg); // Send the bind, execute and sync messages to the server.
     }
-    executeFlush(portalName, maxRows) {
-        const portalNameBuf = Buffer.from(portalName + '\0');
-        const msg = Buffer.allocUnsafe(14 + portalNameBuf.byteLength);
-        let off = this._writeExecuteBuf(msg, portalNameBuf, maxRows, 0);
-        msg[off] = 72; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // H -- Flush
-        this._connection.write(msg);
+    executeFlush(portalName, maxRows) { // Executes a portal and sends a flush to the server so that it doesn't buffer the results. (Important for partial result queries.)
+        const portalNameBuf = Buffer.from(portalName + '\0'); // Turn the portalName string into a null-terminated C string for PostgreSQL protocol.
+        const msg = Buffer.allocUnsafe(14 + portalNameBuf.byteLength); // Allocate message buffer, 5B Execute header, portal name, 4B maxRows and 5B Flush message.
+        let off = this._writeExecuteBuf(msg, portalNameBuf, maxRows, 0); // Write the execute message to the message buffer.
+        msg[off] = 72; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // H -- Flush -- Write the flush to the end of the message.
+        this._connection.write(msg); // Send the execute and flush to the server.
     }
-    close(type, name) { return this.bufferCmd(67, Buffer.from(type + name + '\0')); } // C -- Close
-    authResponse(buffer) { return this.bufferCmd(112, buffer); } // p -- PasswordMessage/GSSResponse/SASLInitialResponse/SASLResponse
-    copyData(buffer) { return this.bufferCmd(100, buffer); } // d -- CopyData
-    copyFail(buffer) { return this.bufferCmd(102, buffer); } // f -- CopyFail
-    bufferCmd(cmd, buffer) {
-        const msg = Buffer.allocUnsafe(5 + buffer.byteLength);
-        msg[0] = cmd;
-        w32(msg, 4 + buffer.byteLength, 1);
-        buffer.copy(msg, 5);
-        this._connection.write(msg);
+    close(type, name) { return this.bufferCmd(67, Buffer.from(type + name + '\0')); } // C -- Close -- Closes a named Portal or a prepared Statement.
+    authResponse(buffer) { return this.bufferCmd(112, buffer); } // p -- PasswordMessage/GSSResponse/SASLInitialResponse/SASLResponse -- Send an authentication response to the server.
+    bufferCmd(cmd, buffer) { // Helper for commands where the body is a Buffer.
+        const msg = Buffer.allocUnsafe(5 + buffer.byteLength); // Allocate message buffer. 5B message header followed by the buffer.
+        msg[0] = cmd; w32(msg, 4 + buffer.byteLength, 1); // Write the message command and length to the header.
+        buffer.copy(msg, 5); // Write the buffer contents after the header.
+        this._connection.write(msg); // Send the command to the server.
     }
-    flush()      { return this.zeroParamCmd(72); } // H -- Flush
-    terminate()  { return this.zeroParamCmd(88); } // X -- Terminate
-    zeroParamCmd(cmd) {
-        const msg = Buffer.allocUnsafe(5); msg[0]=cmd; msg[1]=0; msg[2]=0; msg[3]=0; msg[4]=4;
-        this._connection.write(msg);
+    zeroParamCmd(cmd) { // Helper for commands with no payload.
+        const msg = Buffer.allocUnsafe(5); msg[0]=cmd; msg[1]=0; msg[2]=0; msg[3]=0; msg[4]=4; // Allocate a message buffer and write the command.
+        this._connection.write(msg); // Send the command to the server.
     }
-    parseStatement(statement, cacheStatement) {
-        let parsed = this._parsedStatements[statement];
-        if (!parsed) {
-            parsed = {name: cacheStatement ? (this._parsedStatementCount++).toString() : '', rowParser: null};
-            if (cacheStatement) this._parsedStatements[statement] = parsed;
-            this.parseAndDescribe(parsed.name, statement);
+    parseStatement(statement, cacheStatement) { // Parses a query statement and caches it as a prepared statement if cacheStatement is true. 
+        let parsed = this._parsedStatements[statement]; // Have we cached this already?
+        if (!parsed) { // If the statement is not cached, let's prepare it.
+            parsed = {name: cacheStatement ? (this._parsedStatementCount++).toString() : '', rowParser: null}; // Create statement descriptor. If cacheStatement is true, create a uniquely named prepared statement.
+            if (cacheStatement) this._parsedStatements[statement] = parsed; // If we're creating a prepared statement, add the statement descriptor to the statement lookup table.
+            this.parseAndDescribe(parsed.name, statement); // Ask the server to parse and describe the statement, we'll catch the RowDescriptor in the processPacket loop.
         }
-        return parsed;
+        return parsed; // Return the cached statement descriptor or the one we just created.
     }
-    startQuery(statement, values=[], format=Client.STRING, cacheStatement=true) {
-        this.inQuery = this.parseStatement(statement, cacheStatement);
-        this.bind('', this.inQuery.name, values, format);
+    startQuery(statement, values=[], format=Client.STRING, cacheStatement=true) { // Starts a partial results query. Call getResults to request the next batch of results. 
+        this.inQuery = this.parseStatement(statement, cacheStatement); // Set the inQuery to our statement descriptor so that we know that we're in a partial results query.
+        this.bind('', this.inQuery.name, values, format); // Bind the query statement to the values and set the result format.
     }
-    getResults(maxCount=0, stream=new RowReader()) { this.executeFlush('', maxCount); return this.promise(stream, this.inQuery); }
-    query(statement, values=[], format=Client.STRING, cacheStatement=true, stream=new RowReader()) {
-        const parsed = this.parseStatement(statement, cacheStatement);
-        this.bindExecuteSync('', parsed.name, 0, values, format);
-        return this.promise(stream, parsed);
-    }
-    copy(statement, values, format=Client.STRING, cacheStatement=true, stream=new CopyReader()) { return this.query(statement, values, format, cacheStatement, stream); }
-    copyDone(stream=new CopyReader()) {
-        const msg = Buffer.allocUnsafe(10);
-        msg[0]=99; msg[1]=0; msg[2]=0; msg[3]=0; msg[4]=4; // c -- CopyDone
-        msg[5]=83; msg[6]=0; msg[7]=0; msg[8]=0; msg[9]=4; // S -- Sync
-        this._connection.write(msg);
-        return this.promise(stream, null);
+    getResults(maxCount=0, stream=new RowReader()) { // Get the next maxCount results from a partial query. Use 0 as maxCount to request all remaining rows.
+        this.executeFlush('', maxCount); // Execute the query portal and ask the server to send the results right away.
+        return this.promise(stream, this.inQuery);  // Return a promise of the query results.
     } 
-    sync(stream=new RowReader()) { this.zeroParamCmd(83); return this.promise(stream, null); }
-    cancel() { return new Client({...this.config, cancel: this.backendKey}).connect(this.address, this.host, this.ssl); }
+    query(statement, values=[], format=Client.STRING, cacheStatement=true, stream=new RowReader()) { // Send a query to the server and receive the results to the given stream in the given format.
+        const parsed = this.parseStatement(statement, cacheStatement); // Parse the query statement, optionally caching it as a prepared statement.
+        this.bindExecuteSync('', parsed.name, 0, values, format); // Bind the query parameters and set the result format. Pass 0 as maxRows to return all the result rows.
+        return this.promise(stream, parsed); // Return a promise of the query results.
+    }
+    copyData(buffer) { return this.bufferCmd(100, buffer); } // d -- CopyData -- Send a copy data buffer to the server.
+    copyFail(buffer) { this.bufferCmd(102, buffer); return this.promise(null, null); } // f -- CopyFail -- Tell the server that the copy operation has failed for some reason.
+    copyDone(stream=new CopyReader()) { // Tell the server that we're finished copying data to the server.
+        const msg = Buffer.allocUnsafe(10); // Allocate a message buffer for the CopyDone and Sync messages.
+        msg[0]=99; msg[1]=0; msg[2]=0; msg[3]=0; msg[4]=4; // c -- CopyDone -- Write the CopyDone message at the start of the buffer.
+        msg[5]=83; msg[6]=0; msg[7]=0; msg[8]=0; msg[9]=4; // S -- Sync -- Write a Sync message after CopyDone to commit the transaction.
+        this._connection.write(msg); // Send the messages to the server.
+        return this.promise(stream, null); // Return a promise of the copy operation completion.
+    } 
+    sync(stream=new RowReader()) { this.zeroParamCmd(83); return this.promise(stream, null); } // Sends a Sync command to the server and returns a promise of ready for query.
+    cancel() { return new Client({...this.config, cancel: this.backendKey}).connect(this.address, this.host, this.ssl); } // Cancels the currently running request and returns a promise of the cancellation.
 }
-Client.STRING = 0;
-Client.BINARY = 1;
+Client.STRING = 0; // Enum for the string result format. Matches PostgreSQL protocol.
+Client.BINARY = 1; // Enum for the binary result format. Matches PostgreSQL protocol.
 class RowReader {
     constructor() { this.rows = [], this.cmd = this.oid = this.format = this.rowParser = undefined, this.rowCount = 0; }
-    write(buf) { switch(buf[0]) {
+    write(buf, off=0) { switch(buf[off++]) {
         case 68: return this.rows.push(new (this.rowParser[this.format])(buf)); // D -- DataRow
+        case 100: return this.rows.push(buf.slice(off+4, off + r32(buf, off))); // CopyData
         case 67: // C -- CommandComplete
             const str = buf.toString('utf8', 5, 1 + r32(buf, 1));
             const [_, cmd, oid, rowCount] = str.match(/^(\S+)( \d+)?( \d+)\u0000/) || str.match(/^([^\u0000]*)\u0000/);
             return this.cmd = cmd, this.oid = oid, this.rowCount = parseInt(rowCount || 0);
         case 73: return this.cmd = 'EMPTY'; // I -- EmptyQueryResult
         case 115: return this.cmd = 'SUSPENDED'; // s -- PortalSuspended
-    } }
-}
-class CopyReader extends RowReader {
-    write(buf, off=0) { switch(buf[off++]) {
-        case 100: return this.rows.push(buf.slice(off+4, off + r32(buf, off))); // CopyData
         case 99: return this.cmd = 'COPY'; // CopyDone
         case 71: case 87: case 72: // Copy{In,Both,Out}Response
             this.format = buf[off+4]; off += 5;
@@ -368,4 +363,4 @@ class RowParser {
         this[Client.STRING].prototype.parseColumn = function(start, end) { return this.buf.toString('utf8', start, end); }
     }
 }
-module.exports = { Client, RowReader, CopyReader, RowParser };
+module.exports = { Client, RowReader, RowParser };
