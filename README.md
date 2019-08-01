@@ -1,4 +1,4 @@
-# Quickgres 0.3.0-rc0
+# Quickgres 0.3.0
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -30,7 +30,7 @@ Performance-wise it's ok.
 ## Usage 
 
 ```javascript
-const { Client, ArrayReader } = require('quickgres'); 
+const { Client } = require('quickgres'); 
 
 async function go() {
     const client = new Client({ user: 'myuser', database: 'mydb', password: 'mypass' });
