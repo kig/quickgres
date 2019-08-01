@@ -226,7 +226,7 @@ module.exports = async function runTest(client) {
     t0 = Date.now();
     result = await client.query('SELECT * FROM users', [], Client.BINARY);
     console.error(1000 * result.rows.length / (Date.now() - t0), 'binary query rows per second');
-    result = Buffer.concat(result.rows.map(r => r.buf));
+    result = Buffer.concat(result.rows.map(r => r.rowBuffer));
     let readBack = require('fs').readFileSync('test.dat');
     for (let i = 0; i < result.byteLength; i++) if (result[i] !== readBack[i]) throw(Error("inequality " + i));
     readBack = null;
@@ -293,20 +293,20 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     t0 = Date.now();
-    result = await client.copy('COPY users TO STDOUT (FORMAT text)');
+    result = await client.query('COPY users TO STDOUT (FORMAT text)');
     console.error(1000 * result.rows.length / (Date.now() - t0), 'text copyTo rows per second');
     // console.error(result.rows[0].toString());
 
     await testProtocolState(client);
     t0 = Date.now();
-    result = await client.copy('COPY users TO STDOUT (FORMAT csv)');
+    result = await client.query('COPY users TO STDOUT (FORMAT csv)');
     console.error(1000 * result.rows.length / (Date.now() - t0), 'csv copyTo rows per second');
     // console.error(result.rows[0].toString());
 
 
     await testProtocolState(client);
     t0 = Date.now();
-    result = await client.copy('COPY users TO STDOUT (FORMAT binary)', [], Client.BINARY);
+    result = await client.query('COPY users TO STDOUT (FORMAT binary)', [], Client.BINARY);
     console.error(1000 * result.rows.length / (Date.now() - t0), 'binary copyTo rows per second');
     // console.error(result.rows[0]);
     copyResult = result;
@@ -317,7 +317,7 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     t0 = Date.now();
-    let copyIn = await client.copy('COPY users_copy FROM STDIN (FORMAT binary)', [], Client.BINARY);
+    let copyIn = await client.query('COPY users_copy FROM STDIN (FORMAT binary)', [], Client.BINARY);
     for (let i = 0; i < copyResult.rows.length; i += 1000) {
         const chunk = Buffer.concat(copyResult.rows.slice(i, i + 1000));
         client.copyData(chunk);

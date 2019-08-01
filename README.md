@@ -84,10 +84,10 @@ async function go() {
     }
 
     // Copy data
-    const copyResult = await client.copy('COPY users TO STDOUT (FORMAT binary)');
+    const copyResult = await client.query('COPY users TO STDOUT (FORMAT binary)');
     console.log(copyResult.rows[0]);
 
-    const copyIn = await client.copy('COPY users_copy FROM STDIN (FORMAT binary)');
+    const copyIn = await client.query('COPY users_copy FROM STDIN (FORMAT binary)');
     console.log(copyIn.columnFormats);
     copyResult.rows.forEach(row => client.copyData(row));
     await client.copyDone();
@@ -99,7 +99,9 @@ go();
 ```
 
 ## Changelog
- 
+
+ * 0.3.0-rc1: Removed CopyReader and rolled .copy() into .query(). Commented source code.
+
  * 0.3.0-rc0: Binary query params, binary query results, lazy result parsing, rolled ObjectReader, ArrayReader and RawReader into RowReader, questionable life choices, bloat up to 401 lines 
 
  * 0.2.2-rc1: Request canceling with `cancel`, made statement caching optional, tests for bytea roundtrips and large objects, recover from connection-time `EAGAIN`, squeeze to 349 lines.

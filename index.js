@@ -178,7 +178,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
     }
     _prepareBindValues(portalNameBuf, statementNameBuf, values, valueFormats) { // Calculates the length of a Bind message and converts values to Buffers where needed.
         let bytes = portalNameBuf.byteLength + statementNameBuf.byteLength; // Add up all the buffer lengths here.
-        if (values.buf) return (6 + (valueFormats.length * 2) + bytes + values.buf.byteLength); // Row from a RowParser. Copy it directly. 13B - 2B value count - 5B values.buf header + values.buf + value formats * 2B + bytes
+        if (values.rowBuffer) return (6 + (valueFormats.length * 2) + bytes + values.rowBuffer.byteLength); // Row from a RowParser. Copy it directly. 13B - 2B value count - 5B values.buf header + values.buf + value formats * 2B + bytes
         else for (let i = 0; i < values.length; i++) if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength; // Convert non-null values to buffers and add their byteLength to total number of bytes.
         return (13 + (valueFormats.length * 2) + (values.length * 4) + bytes); // 5B header + 2B value format count as i16 + 2B value count + 2B response format count + 2B single response format + bytes + values * i32 + valueFormats * i16
     }
@@ -188,7 +188,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         off += statementNameBuf.copy(msg, off); // Followed by the statement name. Both are terminated by null bytes.
         off = w16(msg, valueFormats.length, off); // After the names are the formats of the query parameters, this is an array of i16s where 0 means string and 1 means binary. Zero-length array sets everything to string, single element array sets everything to the element format.
         for (let i = 0; i < valueFormats.length; i++) off = w16(msg, valueFormats[i], off); // Write the parameter formats. Multiple element array can set different format for each parameter.
-        if (values.buf) off += values.buf.copy(msg, off, 5); // If we're dealing with a row from a RowParser, copy its body to the message.
+        if (values.rowBuffer) off += values.rowBuffer.copy(msg, off, 5); // If we're dealing with a row from a RowParser, copy its body to the message.
         else { // Otherwise go through the values and write them out.
             off = w16(msg, values.length, off); // The values array starts with a i16 length.
             for (let i = 0; i < values.length; i++) { // And is followed by a i32 length and a payload for each element.
@@ -203,7 +203,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
     }
     bind(portalName, statementName, values=[], format=Client.STRING) { // Bind the parameters to a query. Return the results in the given format. 
         const valueFormats = []; // Value formats tell PostgreSQL if we're giving it strings or binary data.
-        if (values.buf) valueFormats.push(values.format); // When called with a row, use its format as the parameter format.
+        if (values.rowBuffer) valueFormats.push(values.dataFormat); // When called with a row, use its format as the parameter format.
         else { // Otherwise parse the values array.
             values = values.slice(); // Copy the values array so that we can replace the values with Buffer versions.
             for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a Buffer, treat it as a binary PostgreSQL value.
@@ -217,7 +217,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
     }
     bindExecuteSync(portalName, statementName, maxRows=0, values=[], format=Client.STRING) { // Bind the parameters to a query, execute it and sync, using a single write. Return the results in the given format. 
         const valueFormats = []; // Value formats tell PostgreSQL if we're giving it strings or binary data.
-        if (values.buf) valueFormats.push(values.format); // When called with a row, use its format as the parameter format.
+        if (values.rowBuffer) valueFormats.push(values.dataFormat); // When called with a row, use its format as the parameter format.
         else { // Otherwise parse the values array.
             values = values.slice(); // Copy the values array so that we can replace the values with Buffer versions.
             for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a Buffer, treat it as a binary PostgreSQL value.
@@ -286,81 +286,86 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
 }
 Client.STRING = 0; // Enum for the string result format. Matches PostgreSQL protocol.
 Client.BINARY = 1; // Enum for the binary result format. Matches PostgreSQL protocol.
-class RowReader {
-    constructor() { this.rows = [], this.cmd = this.oid = this.format = this.rowParser = undefined, this.rowCount = 0; }
-    write(buf, off=0) { switch(buf[off++]) {
-        case 68: return this.rows.push(new (this.rowParser[this.format])(buf)); // D -- DataRow
-        case 100: return this.rows.push(buf.slice(off+4, off + r32(buf, off))); // CopyData
-        case 67: // C -- CommandComplete
-            const str = buf.toString('utf8', 5, 1 + r32(buf, 1));
-            const [_, cmd, oid, rowCount] = str.match(/^(\S+)( \d+)?( \d+)\u0000/) || str.match(/^([^\u0000]*)\u0000/);
-            return this.cmd = cmd, this.oid = oid, this.rowCount = parseInt(rowCount || 0);
-        case 73: return this.cmd = 'EMPTY'; // I -- EmptyQueryResult
-        case 115: return this.cmd = 'SUSPENDED'; // s -- PortalSuspended
-        case 99: return this.cmd = 'COPY'; // CopyDone
-        case 71: case 87: case 72: // Copy{In,Both,Out}Response
-            this.format = buf[off+4]; off += 5;
-            this.columnCount = r16(buf, off); off += 2;
-            this.columnFormats = [];
-            for (let i = 0; i < this.columnCount; i++) this.columnFormats[i] = r16(buf, off), off += 2;
+class RowReader { // RowReader receives query result messages and converts them into query result rows.
+    constructor() { this.rows = [], this.cmd = this.oid = this.format = this.rowParser = undefined, this.rowCount = 0; } // Set up initial state.
+    write(buf, off=0) { switch(buf[off++]) { // Receive a PostgreSQL protocol message buffer.
+        case 68: return this.rows.push(new (this.rowParser[this.format])(buf)); // D -- DataRow -- Parse the row and store it to rows.
+        case 100: return this.rows.push(buf.slice(off+4, off + r32(buf, off))); // CopyData -- Slice the copy message payload and store it to rows.
+        case 67: // C -- CommandComplete -- Parse the command complete message and set our completion state.
+            const str = buf.toString('utf8', 5, 1 + r32(buf, 1)); // The CommandComplete is a string starting with the completed command name and followed by possible table OID and number of rows affected. 
+            const [_, cmd, oid, rowCount] = str.match(/^(\S+)( \d+)?( \d+)\u0000/) || str.match(/^([^\u0000]*)\u0000/); // Parse out the command, table OID and rowCount. This deals with 'CMD oid rowCount', 'CMD rowCount' and 'CMD' cases.
+            return this.cmd = cmd, this.oid = oid, this.rowCount = parseInt(rowCount || 0); // Store the parsed data and exit.
+        case 73: return this.cmd = 'EMPTY'; // I -- EmptyQueryResult -- Command completion message for an empty query string.
+        case 115: return this.cmd = 'SUSPENDED'; // s -- PortalSuspended -- Completion message for a result batch from a partial results query.
+        case 99: return this.cmd = 'COPY'; // CopyDone -- Completion message for a copy command.
+        case 71: case 87: case 72: // Copy{In,Both,Out}Response -- Copy response describes the number of columns of the following CopyData messages and their formats (0 = string, 1 = binary.)
+            this.format = buf[off+4]; off += 5; // Grab the global format code (0 = string, 1 = binary) and skip the message header.
+            this.columnCount = r16(buf, off); off += 2; // Read the number of columns in the copy message.
+            this.columnFormats = []; // Store the column formats in an array.
+            for (let i = 0; i < this.columnCount; i++) this.columnFormats[i] = r16(buf, off), off += 2; // Read the column formats (0 = string, 1 = binary.)
     } }
 }
-class RowParser {
-    constructor(buf, off=0) {
-        this.buf = buf, this.off = off, this.columns = [], this.columnNames = [];
-        const columnCount = r16(buf, off+5); off += 7;
-        for (let i = 0; i < columnCount; i++) {
-            const nameEnd =  buf.indexOf(0, off);
-            const name = buf.toString('utf8', off, nameEnd); off = nameEnd + 1;
-            const tableOid = r32(buf, off); off += 4;
-            const tableColumnIndex = r16(buf, off); off += 2;
-            const typeOid = r32(buf, off); off += 4;
-            const typeLen = r16(buf, off); off += 2;
-            const typeModifier = r32(buf, off); off += 4;
-            const binary = r16(buf, off); off += 2;
-            const column = { name, tableOid, tableColumnIndex, typeOid, typeLen, typeModifier, binary };
-            this.columns.push(column);
+class RowParser { // RowParser parses DataRow buffers into objects and arrays.
+    constructor(buf, off=0) { // Create a new RowParser from a DataRow message buffer.
+        this.buf = buf, this.off = off, this.columns = [], this.columnNames = []; // Set up parsing state.
+        const columnCount = r16(buf, off+5); off += 7; // Read in the array of column descriptions.
+        for (let i = 0; i < columnCount; i++) { // Each column has a name, followed by table, type and format info.
+            const nameEnd =  buf.indexOf(0, off); // The name is a C string so we find the null byte terminator.
+            const name = buf.toString('utf8', off, nameEnd); off = nameEnd + 1; // Then extract the string without the null byte.
+            const tableOid = r32(buf, off); off += 4; // If the column is from a table, here's the table's OID. Otherwise zero. 
+            const tableColumnIndex = r16(buf, off); off += 2; // Along with the index of the column in the table. If the column is not from a table, this is zero.
+            const typeOid = r32(buf, off); off += 4; // Next comes the PostgreSQL data type OID of the column. SELECT typname, oid, typarray FROM pg_type WHERE typarray != 0;
+            const typeLen = r16(buf, off); off += 2; // The byteLength of a fixed size type. -1 means variable length type.
+            const typeModifier = r32(buf, off); off += 4; // The type modifier, see pg_attribute.atttypmod.
+            const binary = r16(buf, off); off += 2; // Whether the column is sent as binary (0 = string, 1 = binary.)
+            const column = { name, tableOid, tableColumnIndex, typeOid, typeLen, typeModifier, binary }; // Wrap the column description into an object.
+            this.columns.push(column); // And add it to our list of columns.
         }
-        const columns = this.columns;
-        this[Client.BINARY] = function(buf) { this.buf = buf; this.columnCount = columnCount; this.format = Client.BINARY; };
-        this[Client.BINARY].prototype = {
-            parseColumn: function(start, end) { return this.buf.slice(start, end); },
-            toArray: function() { 
-                let off = 7, buf = this.buf, dst = new Array(columnCount);
-                for (let i = 0; i < columnCount; i++) {
-                    const columnLength = r32(buf, off); off += 4;
-                    if (columnLength >= 0) { dst[i] = this.parseColumn(off, off+columnLength); off += columnLength; }
-                    else dst[i] = null;
+        const parserPrototype = Object.create(RowParser.parserPrototype); // Create a new row parser prototype.
+        parserPrototype.columnCount = columnCount; // Store the number of columns to aid in parsing.
+        parserPrototype.rowColumns = this.columns; // Store the column information too, might be useful.
+        for (let i = 0; i < this.columns.length; i++) { // Create column getters.
+            const index = i; // Pull index into the local closure.
+            const getter = function() { // The getter at this index walks the row columns to find the column data.
+                let off = 7, buf = this.rowBuffer; // Set up walk state.
+                for (let j = 0; j < index; j++) { // Walk through columns to find the current index column.
+                    const columnLength = r32(buf, off); off += 4; // Read in the column length.
+                    if (columnLength >= 0) off += columnLength; // Skip over the column data.
                 }
-                return dst;
-            },
-            toObject: function() {
-                let off = 7, buf = this.buf, dst = {};
-                for (let i = 0; i < columnCount; i++) {
-                    const columnLength = r32(buf, off); off += 4;
-                    if (columnLength >= 0) { dst[columns[i].name] = this.parseColumn(off, off+columnLength); off += columnLength; }
-                    else dst[columns[i].name] = null;
-                }
-                return dst;
-            }
-        };
-        for (let i = 0; i < columns.length; i++) {
-            let index = i;
-            const getter = function() {
-                let off = 7, buf = this.buf;
-                for (let j = 0; j < index; j++) {
-                    const columnLength = r32(buf, off); off += 4;
-                    if (columnLength >= 0) off += columnLength;
-                }
-                const length = r32(buf, off); off += 4;
-                return length < 0 ? null : this.parseColumn(off, off+length);
+                const length = r32(buf, off); off += 4; // Read the length of the wanted column.
+                return length < 0 ? null : this.parseColumn(off, off+length); // Parse the column data unless it's a null.
             };
-            Object.defineProperty(this[Client.BINARY].prototype, columns[index].name, {get: getter});
-            Object.defineProperty(this[Client.BINARY].prototype, index, {get: getter});
+            Object.defineProperty(parserPrototype, this.columns[index].name, {get: getter}); // Bind the getter to the column name so that you can do `col = row.my_col`
+            Object.defineProperty(parserPrototype, index, {get: getter}); // Bind the getter to the column index so that you can do `col = row[3]`
         }
-        this[Client.STRING] = function(buf) { this.buf = buf; this.columnCount = columnCount; this.format = Client.STRING; };
-        this[Client.STRING].prototype = Object.create(this[Client.BINARY].prototype);
-        this[Client.STRING].prototype.parseColumn = function(start, end) { return this.buf.toString('utf8', start, end); }
+        this[Client.BINARY] = function(buf) { this.rowBuffer = buf; }; // Binary row constructor just stores the DataRow buffer, it's parsed on access.
+        this[Client.BINARY].prototype = Object.create(parserPrototype); // The prototype of the row stores the row description and methods to access columns. Note that all properties are camelCased to avoid name clashes with column names which are all lowercase.
+        this[Client.STRING] = function(buf) { this.rowBuffer = buf; }; // A String row parser is a binary row parser with a different parseColumn method.
+        this[Client.STRING].prototype = Object.create(parserPrototype); // Copy over the binary row prototype.
+        this[Client.STRING].prototype.dataFormat = Client.STRING; // The string row parser's data format is string.
+        this[Client.STRING].prototype.parseColumn = function(start, end) { return this.rowBuffer.toString('utf8', start, end); } // To parse a string column, convert a slice of the buffer into a string.
     }
 }
-module.exports = { Client, RowReader, RowParser };
+RowParser.parserPrototype = {
+    dataFormat: Client.BINARY, // The binary rows have a binary data format.
+    parseColumn: function(start, end) { return this.rowBuffer.slice(start, end); }, // Parsing a binary column is just a slice.
+    toArray: function() { // Convert the row into a proper Array.
+        let off = 7, buf = this.rowBuffer, dst = new Array(this.columnCount); // Create parsing state and result array.
+        for (let i = 0; i < this.columnCount; i++) { // Go through the columns.
+            const columnLength = r32(buf, off); off += 4; // Each column has an i32 length, followed by the column data.
+            if (columnLength >= 0) { dst[i] = this.parseColumn(off, off+columnLength); off += columnLength; } // Store the column data into the result array.
+            else dst[i] = null; // If the length is negative, the column is null.
+        }
+        return dst; // Return the result array.
+    },
+    toObject: function() { // Convert the row into a column name -> column value hash table object.
+        let off = 7, buf = this.rowBuffer, dst = {}; // Set up parsing state and result object. Off 7 skips over the header and column count (which we know already.)
+        for (let i = 0; i < this.columnCount; i++) { // Go through the columns.
+            const columnLength = r32(buf, off); off += 4; // Read the length of the column.
+            if (columnLength >= 0) { dst[this.rowColumns[i].name] = this.parseColumn(off, off+columnLength); off += columnLength; } // Parse column into result object property.
+            else dst[this.rowColumns[i].name] = null; // A negative length means a null value.
+        }
+        return dst; // Return the result object.
+    }
+};
+module.exports = { Client, RowReader, RowParser }; // Export the Client and the row parsing classes.
