@@ -268,7 +268,7 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     t0 = Date.now();
-    const userFields = copyResult.rowParser.fields.map(f => f.name);
+    const userFields = copyResult.rowParser.columns.map(f => f.name);
     const insertQueryString = `
         INSERT INTO users_copy 
         (${userFields.join(",")}) 

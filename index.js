@@ -187,9 +187,9 @@ class Client {
     }
     _bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats) {
         let bytes = portalNameBuf.byteLength + statementNameBuf.byteLength;
-        if (values.buf) bytes += values.buf.byteLength - values.length * 4 - 7;
+        if (values.buf) return (6 + (valueFormats.length * 2) + bytes + values.buf.byteLength);
         else for (let i = 0; i < values.length; i++) if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength;
-        return (11 + (valueFormats.length * 2) + (values.length * 4) + bytes + 2);
+        return (13 + (valueFormats.length * 2) + (values.length * 4) + bytes);
     }
     _writeBindBuf(wbuf, portalNameBuf, statementNameBuf, values, valueFormats, format) {
         let off = 5; wbuf[0] = 66; // B -- Bind
@@ -197,9 +197,8 @@ class Client {
         off += statementNameBuf.copy(wbuf, off);
         off = w16(wbuf, valueFormats.length, off);
         for (let i = 0; i < valueFormats.length; i++) off = w16(wbuf, valueFormats[i], off);
-        if (values.buf) {
-            off += values.buf.copy(wbuf, off, 5);
-        } else {
+        if (values.buf) off += values.buf.copy(wbuf, off, 5);
+        else {
             off = w16(wbuf, values.length, off);
             for (let i = 0; i < values.length; i++) {
                 if (values[i] === null) off = w32(wbuf, -1, off);
@@ -224,7 +223,8 @@ class Client {
     }
     bindExecuteSync(portalName, statementName, maxRows=0, values=[], format=Client.STRING) {
         const valueFormats = [];
-        for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0;
+        if (values.buf) valueFormats.push(values.format);
+        else for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0;
         const portalNameBuf = Buffer.from(portalName + '\0');
         const statementNameBuf = Buffer.from(statementName + '\0');
         const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats) + 14 + portalNameBuf.byteLength);
@@ -315,9 +315,9 @@ class CopyReader extends RowReader {
 }
 class RowParser {
     constructor(buf, off=0) {
-        this.fields = [], this.fieldNames = [];
-        const fieldCount = r16(buf, off+5); off += 7;
-        for (let i = 0; i < fieldCount; i++) {
+        this.columns = [], this.columnNames = [];
+        const columnCount = r16(buf, off+5); off += 7;
+        for (let i = 0; i < columnCount; i++) {
             const nameEnd =  buf.indexOf(0, off);
             const name = buf.toString('utf8', off, nameEnd); off = nameEnd + 1;
             const tableOid = r32(buf, off); off += 4;
@@ -326,75 +326,49 @@ class RowParser {
             const typeLen = r16(buf, off); off += 2;
             const typeModifier = r32(buf, off); off += 4;
             const binary = r16(buf, off); off += 2;
-            const field = { name, tableOid, tableColumnIndex, typeOid, typeLen, typeModifier, binary };
-            this.fields.push(field);
+            const column = { name, tableOid, tableColumnIndex, typeOid, typeLen, typeModifier, binary };
+            this.columns.push(column);
         }
-        const fields = this.fields;
-        this.BinaryRow = function(buf) { this.buf = buf; this.length = fieldCount; };
-        this.BinaryRow.prototype = {toArray: function() { 
-            let off = 7, buf = this.buf, dst = new Array(fieldCount);
-            for (let i = 0; i < fieldCount; i++) {
-                const fieldLength = r32(buf, off); off += 4;
-                if (fieldLength >= 0) { dst[i] = this.buf.slice(off, off+fieldLength); off += fieldLength; }
-                else dst[i] = null;
+        const columns = this.columns;
+        this[Client.BINARY] = function(buf) { this.buf = buf; this.columnCount = columnCount; this.format = Client.BINARY; };
+        this[Client.BINARY].prototype = {
+            parseColumn: function(start, end) { return this.buf.slice(start, end); },
+            toArray: function() { 
+                let off = 7, buf = this.buf, dst = new Array(columnCount);
+                for (let i = 0; i < columnCount; i++) {
+                    const columnLength = r32(buf, off); off += 4;
+                    if (columnLength >= 0) { dst[i] = this.parseColumn(off, off+columnLength); off += columnLength; }
+                    else dst[i] = null;
+                }
+                return dst;
+            },
+            toObject: function() {
+                let off = 7, buf = this.buf, dst = {};
+                for (let i = 0; i < columnCount; i++) {
+                    const columnLength = r32(buf, off); off += 4;
+                    if (columnLength >= 0) { dst[columns[i].name] = this.parseColumn(off, off+columnLength); off += columnLength; }
+                    else dst[columns[i].name] = null;
+                }
+                return dst;
             }
-            return dst;
-        }, toObject: function() {
-            let off = 7, buf = this.buf, dst = {};
-            for (let i = 0; i < fieldCount; i++) {
-                const fieldLength = r32(buf, off); off += 4;
-                if (fieldLength >= 0) { dst[fields[i].name] = this.buf.slice(off, off+fieldLength); off += fieldLength; }
-                else dst[fields[i].name] = null;
-            }
-            return dst;
-        }};
-        this.fields.forEach((f,index) => {
-            const getter = {get: function() {
+        };
+        for (let i = 0; i < columns.length; i++) {
+            let index = i;
+            const getter = function() {
                 let off = 7, buf = this.buf;
                 for (let j = 0; j < index; j++) {
-                    const fieldLength = r32(buf, off); off += 4;
-                    if (fieldLength >= 0) off += fieldLength;
+                    const columnLength = r32(buf, off); off += 4;
+                    if (columnLength >= 0) off += columnLength;
                 }
                 const length = r32(buf, off); off += 4;
-                return length < 0 ? null : this.buf.slice(off, off+length);
-            } };
-            Object.defineProperty(this.BinaryRow.prototype, f.name, getter);
-            Object.defineProperty(this.BinaryRow.prototype, index, getter);
-        });
-
-        this.StringRow = function(buf) { this.buf = buf; this.length = fieldCount; };
-        this.StringRow.prototype = {toArray: function() { 
-            let off = 7, buf = this.buf, dst = new Array(fieldCount);
-            for (let i = 0; i < fieldCount; i++) {
-                const fieldLength = r32(buf, off); off += 4;
-                if (fieldLength >= 0) { dst[i] = this.buf.toString('utf8', off, off+fieldLength); off += fieldLength; }
-                else dst[i] = null;
-            }
-            return dst;
-        }, toObject: function() {
-            let off = 7, buf = this.buf, dst = {};
-            for (let i = 0; i < fieldCount; i++) {
-                const fieldLength = r32(buf, off); off += 4;
-                if (fieldLength >= 0) { dst[fields[i].name] = this.buf.toString('utf8', off, off+fieldLength); off += fieldLength; }
-                else dst[fields[i].name] = null;
-            }
-            return dst;
-        }};
-        this.fields.forEach((f,index) => {
-            const getter = {get: function() {
-                let off = 7, buf = this.buf;
-                for (let j = 0; j < index; j++) {
-                    const fieldLength = r32(buf, off); off += 4;
-                    if (fieldLength >= 0) off += fieldLength;
-                }
-                const length = r32(buf, off); off += 4;
-                return length < 0 ? null : this.buf.toString('utf8', off, off+length);
-            } };
-            Object.defineProperty(this.StringRow.prototype, f.name, getter);
-            Object.defineProperty(this.StringRow.prototype, index, getter);
-        });
-        this[Client.BINARY] = this.BinaryRow;
-        this[Client.STRING] = this.StringRow;
+                return length < 0 ? null : this.parseColumn(off, off+length);
+            };
+            Object.defineProperty(this[Client.BINARY].prototype, columns[index].name, {get: getter});
+            Object.defineProperty(this[Client.BINARY].prototype, index, {get: getter});
+        }
+        this[Client.STRING] = function(buf) { this.buf = buf; this.columnCount = columnCount; this.format = Client.STRING; };
+        this[Client.STRING].prototype = Object.create(this[Client.BINARY].prototype);
+        this[Client.STRING].prototype.parseColumn = function(start, end) { return this.buf.toString('utf8', start, end); }
     }
 }
 module.exports = { Client, RowReader, CopyReader, RowParser };
