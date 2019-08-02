@@ -2,7 +2,6 @@
 const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
-const assert = require('assert');
 
 function r32(buf, off){ return (buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3]; }
 function r16(buf, off){ return (buf[off] << 8) | buf[off+1]; }
@@ -11,7 +10,7 @@ function w16(buf, v, off) { buf[off]=(v>>8)&255; buf[off+1]=v&255; return off+2;
 
 class Client {
     constructor(config) {
-        assert(config.user && config.database, "You need to provide both 'user' and 'database' in config");
+        if (!(config.user && config.database)) throw Error("You need to provide both 'user' and 'database' in config");
         this._parsedStatementCount = 1;
         this._parsedStatements = {};
         this._packet = { buf: Buffer.alloc(2**16), head: Buffer.alloc(4), cmd: 0, length: 0, index: 0 };
@@ -87,66 +86,43 @@ class Client {
     processPacket(buf, cmd, length, off, outStream) { switch(cmd) {
         case 68: // D -- DataRow
             outStream.stream.rowParser = outStream.parsed.rowParser;
-            outStream.stream.write(buf);
-            break;
-        case 100: // CopyData
-            outStream.stream.write(buf);
-            break;
-        case 84: // T -- RowDescription
-            outStream.parsed.rowParser = new RowParser(buf);
-        case 73: case 72: case 99: // EmptyQueryResponse / CopyOutResponse / CopyDone
-            outStream.stream.write(buf);
-        case 110: case 116: case 49: case 50: case 51: // NoData / ParameterDescription / {Parse,Bind,Close}Complete
-            break;
+            return outStream.stream.write(buf);
+        case 100: return outStream.stream.write(buf); // CopyData
+        case 84: outStream.parsed.rowParser = new RowParser(buf); // T -- RowDescription
+        case 73: case 72: case 99: outStream.stream.write(buf); // EmptyQueryResponse / CopyOutResponse / CopyDone
+        case 110: case 116: case 49: case 50: case 51: break; // NoData / ParameterDescription / {Parse,Bind,Close}Complete
         case 67: // C -- CommandComplete
             if (this.inQuery) this.zeroParamCmd(83); // S -- Sync
-            outStream.stream.write(buf);
-            break;
+            return outStream.stream.write(buf);
         case 115: case 71: case 87: // PortalSuspended / CopyInResponse / CopyBothResponse
             outStream.stream.write(buf);
             this._outStreams.shift();
-            outStream.resolve(outStream.stream);
-            break;
+            return outStream.resolve(outStream.stream);
         case 90: // Z -- ReadyForQuery
             this.inQuery = null;
             this._outStreams.shift();
-            outStream.resolve(outStream.stream);
-            break;
+            return outStream.resolve(outStream.stream);
         case 69: // E -- Error
             this._outStreams[0] = {resolve: () => {}}; // Error is followed by ReadyForQuery, this will eat that.
-            if (outStream) outStream.reject(Error(`${buf[off]} ${buf.toString('utf8', off+1, off+length-4).replace(/\0/g, ' ')}`));
-            break;
+            return outStream.reject(Error(`${buf[off]} ${buf.toString('utf8', off+1, off+length-4).replace(/\0/g, ' ')}`));
         case 83: // S -- ParameterStatus
             const [key, value] = buf.toString('utf8', off, off + length - 5).split('\0');
-            this.serverParameters[key] = value;
-            break;
+            return this.serverParameters[key] = value;
         case 82: // R -- Authentication
             const authResult = r32(buf, off); off += 4;
-            if (authResult === 0) this.authenticationOk = true;
-            else if (authResult === 3) { // 3 -- AuthenticationCleartextPassword
-                assert(this.config.password !== undefined, "No password supplied");
-                this.authResponse(Buffer.from(this.config.password + '\0')); 
-            } else if (authResult === 5) { // 5 -- AuthenticationMD5Password
-                assert(this.config.password !== undefined, "No password supplied");
+            if (authResult === 0) return this.authenticationOk = true;
+            if (this.config.password === undefined) throw Error("No password supplied");
+            if (authResult === 3) return this.authResponse(Buffer.from(this.config.password + '\0')); // 3 -- AuthenticationCleartextPassword
+            if (authResult === 5) { // 5 -- AuthenticationMD5Password
                 const upHash = crypto.createHash('md5').update(this.config.password).update(this.config.user).digest('hex');
                 const salted = crypto.createHash('md5').update(upHash).update(buf.slice(off, off+4)).digest('hex');
-                this.authResponse(Buffer.from(`md5${salted}\0`)); 
-            } else { this.end(); throw(Error(`Authentication method ${authResult} not supported`)); }
-            break;
-        case 78: // NoticeResponse
-            if (this.onNotice) this.onNotice(buf);
-            break;
-        case 65: // NotificationResponse
-            if (this.onNotification) this.onNotification(buf);
-            break;
-        case 75: // K -- BackendKeyData
-            this.backendKey = Buffer.from(buf.slice(off, off + length - 4));
-            break;
-        case 118: // NegotiateProtocolVersion
-            this.end(); throw(Error('NegotiateProtocolVersion not implemented'));
-        case 86: // FunctionCallResponse -- Legacy, not supported.
-            this.end(); throw(Error('FunctionCallResponse not implemented'));
-        default:
+                return this.authResponse(Buffer.from(`md5${salted}\0`)); 
+            }
+            this.end(); throw(Error(`Authentication method ${authResult} not supported`));
+        case 78: return this.onNotice && this.onNotice(buf); // NoticeResponse
+        case 65: return this.onNotification && this.onNotification(buf); // NotificationResponse
+        case 75: return this.backendKey = Buffer.from(buf.slice(off, off + length - 4)); // K -- BackendKeyData
+        case 118: case 86: default: // NegotiateProtocolVersion / FunctionCallResponse / Unknown
             console.error(cmd, String.fromCharCode(cmd), length, buf.toString('utf8', off, off + length - 4));
             this.end(); throw(Error('Unknown message. Protocol state unknown, exiting.'));
     } }
@@ -154,7 +130,7 @@ class Client {
     parseAndDescribe(statementName, statement, types=[]) {
         const strBuf = Buffer.from(`${statementName}\0${statement}\0`);
         const len = 7 + strBuf.byteLength + types.length*4;
-        assert(len <= 2**31, "Query string too large");
+        if (len > 2**31) throw Error("Query string too large");
         const describeBuf = Buffer.from(`S${statementName}\0`);
         const msg = Buffer.allocUnsafe(len + 5 + describeBuf.byteLength);
         let off = 0;
@@ -175,40 +151,38 @@ class Client {
         off = w32(wbuf, maxRows, off);
         return off;
     }
-    _bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats, resultFormats) {
+    _bindBufLength(portalNameBuf, statementNameBuf, values) {
         let bytes = portalNameBuf.byteLength + statementNameBuf.byteLength;
         for (let i = 0; i < values.length; i++) if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength;
-        return (11 + (valueFormats.length * 2) + (values.length * 4) + bytes + (resultFormats.length * 2));
+        return (15 + (values.length * 4) + bytes);
     }
-    _writeBindBuf(wbuf, portalNameBuf, statementNameBuf, values, valueFormats, resultFormats) {
-        let off = 5; wbuf[0] = 66; // B -- Bind
-        off += portalNameBuf.copy(wbuf, off);
-        off += statementNameBuf.copy(wbuf, off);
-        off = w16(wbuf, valueFormats.length, off);
-        for (let i = 0; i < valueFormats.length; i++) off = w16(wbuf, valueFormats[i], off);
-        off = w16(wbuf, values.length, off);
+    _writeBindBuf(msg, portalNameBuf, statementNameBuf, values, resultFormat) {
+        let off = 5; msg[0] = 66; // B -- Bind
+        off += portalNameBuf.copy(msg, off);
+        off += statementNameBuf.copy(msg, off);
+        off = w32(msg, 0x00010000, off);
+        off = w16(msg, values.length, off);
         for (let i = 0; i < values.length; i++) {
-            if (values[i] === null) off = w32(wbuf, -1, off);
-            else off = w32(wbuf, values[i].byteLength, off), off += values[i].copy(wbuf, off);
+            if (values[i] === null) off = w32(msg, -1, off);
+            else off = w32(msg, values[i].byteLength, off), off += values[i].copy(msg, off);
         }
-        off = w16(wbuf, resultFormats.length, off);
-        for (let i = 0; i < resultFormats.length; i++) off = w16(wbuf, resultFormats[i], off);
-        w32(wbuf, off-1, 1);
+        off = w32(msg, 0x00010000, off);
+        w32(msg, off-1, 1);
         return off;
     }
-    bind(portalName, statementName, values=[], valueFormats=[], resultFormats=[]) {
+    bind(portalName, statementName, values=[], resultFormat=0) {
         values = values.slice();
         const portalNameBuf = Buffer.from(portalName + '\0');
         const statementNameBuf = Buffer.from(statementName + '\0');
-        const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats, resultFormats));
-        this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, resultFormats);
+        const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values));
+        this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, resultFormat);
         this._connection.write(msg);
     }
-    bindExecuteSync(portalName, statementName, maxRows=0, values=[], valueFormats=[], resultFormats=[]) {
+    bindExecuteSync(portalName, statementName, maxRows=0, values=[], resultFormat=0) {
         const portalNameBuf = Buffer.from(portalName + '\0');
         const statementNameBuf = Buffer.from(statementName + '\0');
-        const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values, valueFormats, resultFormats) + 14 + portalNameBuf.byteLength);
-        let off = this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, resultFormats);
+        const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values) + 14 + portalNameBuf.byteLength);
+        let off = this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, resultFormat);
         off = this._writeExecuteBuf(msg, portalNameBuf, maxRows, off);
         msg[off] = 83; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // S -- Sync
         this._connection.write(msg);
@@ -322,5 +296,4 @@ class RowParser {
         return dst;
     }
 }
-
 module.exports = { Client, ObjectReader, ArrayReader, RawReader, RowParser };
