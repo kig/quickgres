@@ -1,4 +1,4 @@
-const { Client, ObjectReader, ArrayReader, RawReader } = require('..');
+const { Client } = require('..');
 const assert = require('assert');
 
 async function testProtocolState(client) {
@@ -17,14 +17,14 @@ async function testProtocolState(client) {
 
     result = await client.query('INSERT INTO users_test (name, email, password) VALUES ($1, $2, $3) RETURNING password', ['foo', 'bar', 'baz']);
     assert(result.rows.length === 1, 'INSERT got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
-    assert(result.rows[0].password === 'baz', 'INSERT did not return password' + ` ${JSON.stringify(result.rows)}`);
+    assert(result.rows[0][0] === 'baz', 'INSERT did not return password' + ` ${JSON.stringify(result.rows)}`);
     assert(result.rowCount === 1, 'INSERT has wrong rowCount' + ` ${JSON.stringify(result)}`);
     assert(result.cmd === 'INSERT', 'INSERT has wrong cmd' + ` ${JSON.stringify(result)}`)
 
     result = await client.query('SELECT name, email, password FROM users_test WHERE password = $1', ['baz']);
     assert(result.rows.length === 1, 'SELECT 2 got wrong number of rows') + ` ${JSON.stringify(result.rows)}`;
-    assert(result.rows[0].name === 'foo', 'SELECT 2 did not get right name' + ` ${JSON.stringify(result.rows)}`);
-    assert(result.rows[0].email === 'bar', 'SELECT 2 did not get right email' + ` ${JSON.stringify(result.rows)}`);
+    assert(result.rows[0][0] === 'foo', 'SELECT 2 did not get right name' + ` ${JSON.stringify(result.rows)}`);
+    assert(result.rows[0][1] === 'bar', 'SELECT 2 did not get right email' + ` ${JSON.stringify(result.rows)}`);
     assert(result.rowCount === 1, 'SELECT 2 has wrong rowCount' + ` ${JSON.stringify(result)}`);
     assert(result.cmd === 'SELECT', 'SELECT 2 has wrong cmd' + ` ${JSON.stringify(result)}`)
 
@@ -40,7 +40,7 @@ async function testProtocolState(client) {
 
     result = await client.query('SELECT name, email, password FROM users_test WHERE password = $1', ['baz']);
     assert(result.rows.length === 2, 'SELECT 3 got wrong number of rows' + ` ${JSON.stringify(result.rows)}`);
-    assert(result.rows.every(r => r.password === 'baz' && r.name === 'qux'), 'SELECT 3 rows have wrong password or name' + ` ${JSON.stringify(result.rows)}`)
+    assert(result.rows.every(r => r[2] === 'baz' && r[0] === 'qux'), 'SELECT 3 rows have wrong password or name' + ` ${JSON.stringify(result.rows)}`)
     assert(result.rowCount === 2, 'SELECT 3 has wrong rowCount' + ` ${JSON.stringify(result)}`);
     assert(result.cmd === 'SELECT', 'SELECT 3 has wrong cmd' + ` ${JSON.stringify(result)}`)
 
@@ -70,7 +70,7 @@ module.exports = async function runTest(client) {
 
     for (var i = 0; i < 100; i++) {
         const randos = randomBytes();
-        result = await client.query('SELECT $1::bytea, octet_length($1::bytea)', [randos], new ArrayReader());
+        result = await client.query('SELECT $1::bytea, octet_length($1::bytea)', [randos]);
         assert(result.rows[0][0] === randos, "Bytea roundtrip failed " + randos + " !== " + result.rows[0][0]);
         assert(parseInt(result.rows[0][1]) === randos.length/2-1, "Bytea wrong length " + (randos.length/2-1) + " !== " + result.rows[0][1]);
     }
@@ -79,7 +79,7 @@ module.exports = async function runTest(client) {
     for (var i = 0; i < 256; i++) bytes[i] = i;
     await client.query('CREATE TABLE IF NOT EXISTS large_object_test (name text, file oid)');
     await client.query('INSERT INTO large_object_test (name, file) VALUES ($1, lo_from_bytea(0, $2))', ['my_object', '\\x' + bytes.toString('hex')]);
-    result = await client.query('SELECT lo_get(file), octet_length(lo_get(file)) FROM large_object_test WHERE name = $1', ['my_object'], new ArrayReader());
+    result = await client.query('SELECT lo_get(file), octet_length(lo_get(file)) FROM large_object_test WHERE name = $1', ['my_object']);
     await client.query('SELECT lo_unlink(file) FROM large_object_test WHERE name = $1', ['my_object']);
     await client.query('DROP TABLE large_object_test');
     assert(parseInt(result.rows[0][1]) === 256, "Large object wrong length");
@@ -137,14 +137,9 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     t0 = Date.now();
-    result = await client.query('SELECT * FROM users', [], new RawReader());
-    console.error(1000 * result.rows.length / (Date.now() - t0), 'query raw rows per second');
-    result = null;
-
-    await testProtocolState(client);
-    t0 = Date.now();
     result = await client.query('SELECT * FROM users', []);
     console.error(1000 * result.rows.length / (Date.now() - t0), 'query rows per second');
+    copyResult = result;
     result = null;
 
     await testProtocolState(client);
@@ -157,13 +152,6 @@ module.exports = async function runTest(client) {
         console.error('Cancel test: ' + err.message);
     }
     console.error('Elapsed: ' + (Date.now() - t0) + ' ms');
-    result = null;
-
-    await testProtocolState(client);
-    t0 = Date.now();
-    result = await client.query('SELECT * FROM users', [], new ArrayReader());
-    console.error(1000 * result.rows.length / (Date.now() - t0), 'query array rows per second');
-    copyResult = result;
     result = null;
 
     await testProtocolState(client);

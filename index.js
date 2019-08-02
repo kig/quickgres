@@ -221,30 +221,29 @@ class Client {
         this.inQuery = this.parseStatement(statement, cacheStatement);
         this.bind('', this.inQuery.name, values);
     }
-    getResults(maxCount=0, stream=new ObjectReader()) {
+    getResults(maxCount=0, stream=new RowReader()) {
         this.executeFlush('', maxCount);
         return this.promise(stream, this.inQuery);
     }
-    query(statement, values=[], stream=new ObjectReader(), cacheStatement=true) {
+    query(statement, values=[], stream=new RowReader(), cacheStatement=true) {
         const parsed = this.parseStatement(statement, cacheStatement);
         this.bindExecuteSync('', parsed.name, 0, values);
         return this.promise(stream, parsed);
     }
-    copyDone(stream=new ObjectReader()) {
+    copyDone(stream=new RowReader()) {
         const msg = Buffer.allocUnsafe(10);
         msg[0]=99; msg[1]=0; msg[2]=0; msg[3]=0; msg[4]=4; // c -- CopyDone
         msg[5]=83; msg[6]=0; msg[7]=0; msg[8]=0; msg[9]=4; // S -- Sync
         this._connection.write(msg);
         return this.promise(stream, null);
     } 
-    sync(stream=new ObjectReader()) { this.zeroParamCmd(83); return this.promise(stream, null); }
+    sync(stream=new RowReader()) { this.zeroParamCmd(83); return this.promise(stream, null); }
     cancel() { return new Client({...this.config, cancel: this.backendKey}).connect(this.address, this.host, this.ssl); }
 }
-class RawReader {
+class RowReader {
     constructor() { this.rows = [], this.cmd = this.oid = this.rowParser = undefined, this.rowCount = 0; }
-    parseRow(buf, off) { return Buffer.from(buf.slice(off-1, off+r32(buf, off))); }
     write(buf, off=0) { switch(buf[off++]) {
-        case 68: return this.rows.push(this.parseRow(buf, off)); // D -- DataRow
+        case 68: return this.rows.push(this.rowParser.parseArray(buf, off+6, [])); // D -- DataRow
         case 100: return this.rows.push(Buffer.from(buf.slice(off+4, off + r32(buf, off)))); // CopyData
         case 67: // C -- CommandComplete
             const str = buf.toString('utf8', off+4, off + r32(buf, off));
@@ -260,8 +259,6 @@ class RawReader {
             for (let i = 0; i < this.columnCount; i++) this.columnFormats[i] = r16(buf, off), off += 2;
     } }
 }
-class ArrayReader extends RawReader { parseRow(buf, off) { return this.rowParser.parseArray(buf, off+6, []); } }
-class ObjectReader extends RawReader { parseRow(buf, off) { return this.rowParser.parse(buf, off+6, {}); } }
 class RowParser {
     constructor(buf, off=0) {
         this.fields = [], this.fieldNames = [];
@@ -279,14 +276,6 @@ class RowParser {
             this.fields.push(field);
         }
     }
-    parse(buf, off, dst) {
-        for (let i = 0; i < this.fieldCount; i++) {
-            const fieldLength = r32(buf, off); off += 4;
-            if (fieldLength < 0) dst[this.fields[i].name] = null;
-            else dst[this.fields[i].name] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
-        }
-        return dst;
-    }
     parseArray(buf, off, dst) {
         for (let i = 0; i < this.fieldCount; i++) {
             const fieldLength = r32(buf, off); off += 4;
@@ -296,4 +285,4 @@ class RowParser {
         return dst;
     }
 }
-module.exports = { Client, ObjectReader, ArrayReader, RawReader, RowParser };
+module.exports = { Client, RowReader, RowParser };
