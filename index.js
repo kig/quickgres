@@ -14,39 +14,37 @@ class Client {
         assert(config.user && config.database, "You need to provide both 'user' and 'database' in config");
         this._parsedStatementCount = 1;
         this._parsedStatements = {};
-        this._packet = { buf: Buffer.alloc(2**16), head: Buffer.alloc(4), cmd: 0, len: 0, idx: 0 };
+        this._packet = { buf: Buffer.alloc(2**16), head: Buffer.alloc(4), cmd: 0, length: 0, index: 0 };
         this._outStreams = [];
         this.serverParameters = {};
         this.config = config;
     }
-    connect(address, host) {
-        this.address = address, this.host = host;
+    connect(address, host, ssl) {
+        this.address = address, this.host = host, this.ssl = ssl;
         this._connect();
         return this.promise(null, null);
     }
     _connect() {
         this._connection = net.createConnection(this.address, this.host);
-        this._connection.once('connect', this.onInitialConnect.bind(this));
+        this._connection.once('connect', () => {
+            if (this.ssl) {
+                this._connection.once('data', (buffer) => {
+                    if (buffer[0] !== 83) throw Error("Error establishing an SSL connection");
+                    this._connection = tls.connect({socket: this._connection, ...this.ssl}, this.onConnect.bind(this));
+                    this._connection.on('error', this.onError.bind(this));
+                });
+                this._connection.write(Buffer.from([0,0,0,8,4,210,22,47])); // SSL Request
+            } else this.onConnect();
+        });
         this._connection.on('error', this.onError.bind(this));
     }
     end() { 
-        this.terminate();
+        this.zeroParamCmd(88); // X -- Terminate
         return this._connection.end();
     }
     onError(err) {
         if (err.message.startsWith('connect EAGAIN ')) this._connect();
         else this._outStreams.splice(0).forEach(s => s.reject(err));
-    }
-    onInitialConnect() {
-        if (this.config.ssl) {
-            this._connection.once('data', this.onSSLResponse.bind(this));
-            this._connection.write(Buffer.from([0,0,0,8,4,210,22,47])); // SSL Request
-        } else this.onConnect();
-    }
-    onSSLResponse(buffer) {
-        if (buffer[0] !== 83) throw Error("Error establishing an SSL connection");
-        this._connection = tls.connect({socket: this._connection, ...this.config.ssl}, this.onConnect.bind(this));
-        this._connection.on('error', this.onError.bind(this));
     }
     onConnect() {
         if (this.config.cancel) {
@@ -56,8 +54,7 @@ class Client {
         }
         this._connection.on('data', this.onData.bind(this));
         let chunks = [Buffer.from([0,0,0,0,0,3,0,0])]; // Protocol version 3.0
-        const filteredKeys = {password: 1, ssl: 1};
-        for (let n in this.config) if (!filteredKeys[n]) chunks.push(Buffer.from(`${n}\0${this.config[n]}\0`));
+        for (let n in this.config) if (n !== 'password') chunks.push(Buffer.from(`${n}\0${this.config[n]}\0`));
         chunks.push(Buffer.alloc(1));
         const msg = Buffer.concat(chunks);
         w32(msg, msg.byteLength, 0);
@@ -66,11 +63,8 @@ class Client {
     onData(buf) {
         const packet = this._packet;
         for (var i = 0; i < buf.byteLength;) {
-            if (packet.cmd === 0) {
-                packet.cmd = buf[i++];
-                packet.length = 0;
-                packet.index = 0;
-            } else if (packet.index < 4) {
+            if (packet.cmd === 0) packet.cmd = buf[i++];
+            else if (packet.index < 4) {
                 packet.head[packet.index++] = buf[i++];
                 if (packet.index === 4) {
                     packet.length = r32(packet.head, 0);
@@ -85,7 +79,7 @@ class Client {
                 i += copiedBytes;
                 if (packet.index === packet.length) {
                     this.processPacket(packet.buf, packet.cmd, packet.length, 5, this._outStreams[0]);
-                    packet.cmd = 0;
+                    packet.cmd = packet.index = 0;
                 }
             }
         }
@@ -93,33 +87,33 @@ class Client {
     processPacket(buf, cmd, length, off, outStream) { switch(cmd) {
         case 68: // D -- DataRow
             outStream.stream.rowParser = outStream.parsed.rowParser;
-            outStream.stream.write(buf.slice(0, length+1));
+            outStream.stream.write(buf);
             break;
         case 100: // CopyData
-            outStream.stream.write(buf.slice(0, length+1));
+            outStream.stream.write(buf);
             break;
         case 84: // T -- RowDescription
             outStream.parsed.rowParser = new RowParser(buf);
         case 73: case 72: case 99: // EmptyQueryResponse / CopyOutResponse / CopyDone
-            outStream.stream.write(buf.slice(0, length+1));
+            outStream.stream.write(buf);
         case 110: case 116: case 49: case 50: case 51: // NoData / ParameterDescription / {Parse,Bind,Close}Complete
             break;
         case 67: // C -- CommandComplete
             if (this.inQuery) this.zeroParamCmd(83); // S -- Sync
-            outStream.stream.write(buf.slice(0, length+1));
+            outStream.stream.write(buf);
             break;
         case 115: case 71: case 87: // PortalSuspended / CopyInResponse / CopyBothResponse
-            outStream.stream.write(buf.slice(0, length+1));
+            outStream.stream.write(buf);
             this._outStreams.shift();
             outStream.resolve(outStream.stream);
             break;
         case 90: // Z -- ReadyForQuery
             this.inQuery = null;
             this._outStreams.shift();
-            if (outStream) outStream.resolve(outStream.stream);
+            outStream.resolve(outStream.stream);
             break;
         case 69: // E -- Error
-            this._outStreams[0] = null; // Error is followed by ReadyForQuery, this will eat that.
+            this._outStreams[0] = {resolve: () => {}}; // Error is followed by ReadyForQuery, this will eat that.
             if (outStream) outStream.reject(Error(`${buf[off]} ${buf.toString('utf8', off+1, off+length-4).replace(/\0/g, ' ')}`));
             break;
         case 83: // S -- ParameterStatus
@@ -232,13 +226,10 @@ class Client {
     copyFail(buffer) { return this.bufferCmd(102, buffer); } // f -- CopyFail
     bufferCmd(cmd, buffer) {
         const msg = Buffer.allocUnsafe(5 + buffer.byteLength);
-        msg[0] = cmd;
-        w32(msg, 4 + buffer.byteLength, 1);
+        msg[0] = cmd; w32(msg, 4 + buffer.byteLength, 1);
         buffer.copy(msg, 5);
         this._connection.write(msg);
     }
-    flush()      { return this.zeroParamCmd(72); } // H -- Flush
-    terminate()  { return this.zeroParamCmd(88); } // X -- Terminate
     zeroParamCmd(cmd) {
         const msg = Buffer.allocUnsafe(5); msg[0]=cmd; msg[1]=0; msg[2]=0; msg[3]=0; msg[4]=4;
         this._connection.write(msg);
@@ -256,14 +247,16 @@ class Client {
         this.inQuery = this.parseStatement(statement, cacheStatement);
         this.bind('', this.inQuery.name, values);
     }
-    getResults(maxCount=0, stream=new ObjectReader()) { this.executeFlush('', maxCount); return this.promise(stream, this.inQuery); }
+    getResults(maxCount=0, stream=new ObjectReader()) {
+        this.executeFlush('', maxCount);
+        return this.promise(stream, this.inQuery);
+    }
     query(statement, values=[], stream=new ObjectReader(), cacheStatement=true) {
         const parsed = this.parseStatement(statement, cacheStatement);
         this.bindExecuteSync('', parsed.name, 0, values);
         return this.promise(stream, parsed);
     }
-    copy(statement, values, stream=new CopyReader(), cacheStatement=true) { return this.query(statement, values, stream, cacheStatement); }
-    copyDone(stream=new CopyReader()) {
+    copyDone(stream=new ObjectReader()) {
         const msg = Buffer.allocUnsafe(10);
         msg[0]=99; msg[1]=0; msg[2]=0; msg[3]=0; msg[4]=4; // c -- CopyDone
         msg[5]=83; msg[6]=0; msg[7]=0; msg[8]=0; msg[9]=4; // S -- Sync
@@ -271,26 +264,20 @@ class Client {
         return this.promise(stream, null);
     } 
     sync(stream=new ObjectReader()) { this.zeroParamCmd(83); return this.promise(stream, null); }
-    cancel() { return new Client({...this.config, cancel: this.backendKey}).connect(this.address, this.host); }
+    cancel() { return new Client({...this.config, cancel: this.backendKey}).connect(this.address, this.host, this.ssl); }
 }
 class RawReader {
     constructor() { this.rows = [], this.cmd = this.oid = this.rowParser = undefined, this.rowCount = 0; }
-    parseRow(buf) { return Buffer.from(buf); }
-    write(buf) { switch(buf[0]) {
-        case 68: return this.rows.push(this.parseRow(buf)); // D -- DataRow
+    parseRow(buf, off) { return Buffer.from(buf.slice(off-1, off+r32(buf, off))); }
+    write(buf, off=0) { switch(buf[off++]) {
+        case 68: return this.rows.push(this.parseRow(buf, off)); // D -- DataRow
+        case 100: return this.rows.push(Buffer.from(buf.slice(off+4, off + r32(buf, off)))); // CopyData
         case 67: // C -- CommandComplete
-            const str = buf.toString('utf8', 5, 1 + r32(buf, 1));
+            const str = buf.toString('utf8', off+4, off + r32(buf, off));
             const [_, cmd, oid, rowCount] = str.match(/^(\S+)( \d+)?( \d+)\u0000/) || str.match(/^([^\u0000]*)\u0000/);
             return this.cmd = cmd, this.oid = oid, this.rowCount = parseInt(rowCount || 0);
         case 73: return this.cmd = 'EMPTY'; // I -- EmptyQueryResult
         case 115: return this.cmd = 'SUSPENDED'; // s -- PortalSuspended
-    } }
-}
-class ArrayReader extends RawReader { parseRow(buf) { return RowParser.parseArray(buf); } }
-class ObjectReader extends RawReader { parseRow(buf) { return this.rowParser.parse(buf); } }
-class CopyReader extends RawReader {
-    write(buf, off=0) { switch(buf[off++]) {
-        case 100: return this.rows.push(Buffer.from(buf.slice(off+4, off + r32(buf, off)))); // CopyData
         case 99: return this.cmd = 'COPY'; // CopyDone
         case 71: case 87: case 72: // Copy{In,Both,Out}Response
             this.format = buf[off+4]; off += 5;
@@ -299,11 +286,13 @@ class CopyReader extends RawReader {
             for (let i = 0; i < this.columnCount; i++) this.columnFormats[i] = r16(buf, off), off += 2;
     } }
 }
+class ArrayReader extends RawReader { parseRow(buf, off) { return this.rowParser.parseArray(buf, off+6, []); } }
+class ObjectReader extends RawReader { parseRow(buf, off) { return this.rowParser.parse(buf, off+6, {}); } }
 class RowParser {
     constructor(buf, off=0) {
         this.fields = [], this.fieldNames = [];
-        const fieldCount = r16(buf, off+5); off += 7;
-        for (let i = 0; i < fieldCount; i++) {
+        this.fieldCount = r16(buf, off+5); off += 7;
+        for (let i = 0; i < this.fieldCount; i++) {
             const nameEnd =  buf.indexOf(0, off);
             const name = buf.toString('utf8', off, nameEnd); off = nameEnd + 1;
             const tableOid = r32(buf, off); off += 4;
@@ -315,27 +304,23 @@ class RowParser {
             const field = { name, tableOid, tableColumnIndex, typeOid, typeLen, typeModifier, binary };
             this.fields.push(field);
         }
-        this.fieldObj = function() {};
-        this.fieldObj.prototype = this.fields.reduce((o,f) => (o[f.name]='', o), {});
     }
-    parse(buf, off=0, dst=new this.fieldObj()) {
-        const fieldCount = r16(buf, off+5); off += 7;
-        for (let i = 0; i < fieldCount; i++) {
+    parse(buf, off, dst) {
+        for (let i = 0; i < this.fieldCount; i++) {
             const fieldLength = r32(buf, off); off += 4;
             if (fieldLength < 0) dst[this.fields[i].name] = null;
             else dst[this.fields[i].name] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
         }
         return dst;
     }
-}
-RowParser.parseArray = function(buf, off=0, dst=[]) {
-    const fieldCount = r16(buf, off+5); off += 7;
-    for (let i = 0; i < fieldCount; i++) {
-        const fieldLength = r32(buf, off); off += 4;
-        if (fieldLength < 0) dst[i] = null;
-        else dst[i] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
+    parseArray(buf, off, dst) {
+        for (let i = 0; i < this.fieldCount; i++) {
+            const fieldLength = r32(buf, off); off += 4;
+            if (fieldLength < 0) dst[i] = null;
+            else dst[i] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
+        }
+        return dst;
     }
-    return dst;
-};
+}
 
-module.exports = { Client, ObjectReader, ArrayReader, RawReader, CopyReader, RowParser };
+module.exports = { Client, ObjectReader, ArrayReader, RawReader, RowParser };

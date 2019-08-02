@@ -1,4 +1,4 @@
-const { Client, ObjectReader, ArrayReader, RawReader, CopyReader } = require('..');
+const { Client, ObjectReader, ArrayReader, RawReader } = require('..');
 const assert = require('assert');
 
 async function testProtocolState(client) {
@@ -196,20 +196,20 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     t0 = Date.now();
-    result = await client.copy('COPY users TO STDOUT (FORMAT text)');
+    result = await client.query('COPY users TO STDOUT (FORMAT text)');
     console.error(1000 * result.rows.length / (Date.now() - t0), 'text copyTo rows per second');
     // console.error(result.rows[0].toString());
 
     await testProtocolState(client);
     t0 = Date.now();
-    result = await client.copy('COPY users TO STDOUT (FORMAT csv)');
+    result = await client.query('COPY users TO STDOUT (FORMAT csv)');
     console.error(1000 * result.rows.length / (Date.now() - t0), 'csv copyTo rows per second');
     // console.error(result.rows[0].toString());
 
 
     await testProtocolState(client);
     t0 = Date.now();
-    result = await client.copy('COPY users TO STDOUT (FORMAT binary)');
+    result = await client.query('COPY users TO STDOUT (FORMAT binary)');
     console.error(1000 * result.rows.length / (Date.now() - t0), 'binary copyTo rows per second');
     // console.error(result.rows[0]);
     copyResult = result;
@@ -220,7 +220,7 @@ module.exports = async function runTest(client) {
 
     await testProtocolState(client);
     t0 = Date.now();
-    let copyIn = await client.copy('COPY users_copy FROM STDIN (FORMAT binary)');
+    let copyIn = await client.query('COPY users_copy FROM STDIN (FORMAT binary)');
     for (let i = 0; i < copyResult.rows.length; i += 1000) {
         const chunk = Buffer.concat(copyResult.rows.slice(i, i + 1000));
         client.copyData(chunk);
