@@ -1,4 +1,4 @@
-# Quickgres 0.3.0
+# Quickgres 0.3.1
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -99,6 +99,8 @@ go();
 ```
 
 ## Changelog
+
+ * 0.3.1: Treating undefined as null in query parameters. DB error messages start with 'PostgreSQL Error:'.
 
  * 0.3.0-rc1: Removed CopyReader and rolled .copy() into .query(). Commented source code.
 
