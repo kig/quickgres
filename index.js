@@ -15,7 +15,6 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         this._parsedStatements = {}; // Index to store prepared statements. Maps from a query string to statement name and row parser.
         this._packet = { buf: null, head: Buffer.alloc(4), cmd: 0, length: 0, index: 0 }; // Stores the current incoming protocol message.
         this._queryHandlers = []; // Internal queue of query result handlers, called in order when receiving query results.
-        this._formatQueue = []; // Internal queue of query result formats, either Client.STRING or Client.BINARY.
         this.serverParameters = {}; // Parameters received from the PostgreSQL server on connecting. Stuff like {server_encoding: 'UTF8'}
         this.config = config; // Store the config for later use.
     }
@@ -44,7 +43,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
     }
     onError(err) { // Deal with errors in the connection.
         if (err.message.startsWith('connect EAGAIN ')) this._connect(); // If you try to open too many UNIX sockets too quickly, the Linux syscall sends an EAGAIN interrupt asking you to try again.
-        else this._formatQueue.splice(0), this._queryHandlers.splice(0).forEach(s => s.reject(err)); // Clear out the query result handlers and reject them all. 
+        else this._queryHandlers.splice(0).forEach(s => s.reject(err)); // Clear out the query result handlers and reject them all. 
     }
     onConnect() { // Initiate connection with PostgreSQL server by sending the startup packet.
         if (this.config.cancel) { // Unless this connection is for canceling a long-running request.
@@ -77,15 +76,14 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
                 this._packet.index += copiedBytes; // Advance byte counters to keep track where in the packet we currently are.
                 i += copiedBytes; // Advance loop byte counter by the amount of bytes processed thus far.
                 if (this._packet.index === this._packet.length) { // If the packet is complete, process it and get ready for the next packet.
-                    this.processPacket(this._packet.buf, this._packet.cmd, this._packet.length, 5, this._queryHandlers[0], this._formatQueue[0]); // Pass packet to protocol parser.
+                    this.processPacket(this._packet.buf, this._packet.cmd, this._packet.length, 5, this._queryHandlers[0]); // Pass packet to protocol parser.
                     this._packet.cmd = this._packet.index = this._packet.length = 0; // Reset the packet.
                 }
             }
         }
     }
-    processPacket(buf, cmd, length, off, queryHandler, streamFormat) { switch(cmd) { // Process a protocol packet and write it to the output stream if needed.
+    processPacket(buf, cmd, length, off, queryHandler) { switch(cmd) { // Process a protocol packet and write it to the output stream if needed.
         case 68: // D -- DataRow -- Writes query result rows to the output stream and tells the output stream how to parse them.
-            queryHandler.stream.format = streamFormat; // Set the output stream's data format (either Client.STRING or Client.BINARY.)
             queryHandler.stream.rowParser = queryHandler.parsed.rowParser; // Set the output stream's row data parser.
             queryHandler.stream.write(buf); // Write the DataRow packet to the output stream for further processing.
             break;
@@ -104,17 +102,16 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
             break;
         case 115: case 71: case 87: // PortalSuspended / CopyInResponse / CopyBothResponse -- Two-part query flow messages. Resolve promises and get written to the output stream.
             queryHandler.stream.write(buf); // Pass the results to either query.getResult stream or CopyIn stream.
-            this._queryHandlers.shift(); // Advance _queryHandlers (note that the streamFormat is still valid so we don't shift _formatQueue).
+            this._queryHandlers.shift(); // Advance _queryHandlers.
             queryHandler.resolve(queryHandler.stream); // Resolve the partial query or CopyInResponse promise.
             break;
         case 90: // Z -- ReadyForQuery -- Done with the current query, resolve it. Received at the start of the connection, after a Sync, or after an Error.
             this.inQuery = null; // End partial query.
             this._queryHandlers.shift(); // Advance query output streams.
-            this._formatQueue.shift(); // Advance query formats as well, the next query may have a different format.
             queryHandler.resolve(queryHandler.stream); // Resolve the current query's promise.
             break;
         case 69: // E -- Error -- There was an error in handling the query, reject the current queryHandler promise.
-            this._queryHandlers[0] = {resolve: function() {}}; // Error is followed by ReadyForQuery, this will eat that. _formatQueue[0] doesn't require overwriting.
+            this._queryHandlers[0] = {resolve: function() {}}; // Error is followed by ReadyForQuery, this will eat that.
             queryHandler.reject(Error(`${buf[off]} ${buf.toString('utf8', off+1, off+length-4).replace(/\0/g, ' ')}`)); // Reject the current query with the error message from the server.
             break;
         case 83: // S -- ParameterStatus -- Server parameters are received at the start of the connection, but may also arrive at any time.
@@ -176,14 +173,24 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         off = w32(msg, maxRows, off); // At the end of the Execute message is the maximum number of result rows to return. Use zero to return all rows.
         return off; // Return the offset after the Execute message.
     }
-    _prepareBindValues(portalNameBuf, statementNameBuf, values, valueFormats) { // Calculates the length of a Bind message and converts values to Buffers where needed.
-        let bytes = portalNameBuf.byteLength + statementNameBuf.byteLength; // Add up all the buffer lengths here.
-        if (values.rowBuffer) return (6 + (valueFormats.length * 2) + bytes + values.rowBuffer.byteLength); // Row from a RowParser. Copy it directly. 13B - 2B value count - 5B values.buf header + values.buf + value formats * 2B + bytes
-        else for (let i = 0; i < values.length; i++) if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength; // Convert non-null values to buffers and add their byteLength to total number of bytes.
-        return (13 + (valueFormats.length * 2) + (values.length * 4) + bytes); // 5B header + 2B value format count as i16 + 2B value count + 2B response format count + 2B single response format + bytes + values * i32 + valueFormats * i16
-    }
-    _writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, offset) { // Write a Bind message to the msg buffer, starting at the given offset.
-        let off = offset + 5; msg[offset] = 66; // B -- Bind -- Write Bind command at the start of the message. Skip off to after the message header.
+    _bindBuf(portalNameBuf, statementNameBuf, values, resultFormat, extraBytes) {
+        const valueFormats = []; // Value formats tell PostgreSQL if we're giving it strings or binary data.
+        let bytes = portalNameBuf.byteLength + statementNameBuf.byteLength; // Add up all the buffer lengths to bytes.
+        let bindMessageLength; // This will hold the calculated length of a Bind message.
+        if (values.rowBuffer) { // Values is a row from a previous query, we can copy it over directly.
+            valueFormats.push(values.dataFormat); // When called with a row, use its format as the parameter format.
+            bindMessageLength = (6 + (valueFormats.length * 2) + bytes + values.rowBuffer.byteLength); // Row from a RowParser. Copy it directly. 13B - 2B value count - 5B values.buf header + values.buf + value formats * 2B + bytes
+        } else { // Prepare the parameter values for the bind message and calculate message length.
+            values = values.slice(); // Copy values and convert them to Buffers.
+            for (let i = 0; i < values.length; i++) { // Go through the copy of values, converting values to buffers and determining value formats.
+                valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // Buffer parameters are passed as binary to PostgreSQL.
+                if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength; // Convert non-null values to buffers and add their byteLength to total number of bytes.
+            }
+            bindMessageLength = (13 + (values.length * 4 + valueFormats.length * 2) + bytes); // 5B header + 2B value format count as i16 + 2B value count + 2B response format count + 2B single response format + bytes + values * i32 + valueFormats * i16
+        }
+        const msg = Buffer.allocUnsafe(bindMessageLength + extraBytes);
+        let off = 5; msg[0] = 66; // B -- Bind -- Write Bind command at the start of the message. Skip off to after the message header.
+        w32(msg, bindMessageLength-1, 1); // Write the length of the bind message in the message header.
         off += portalNameBuf.copy(msg, off); // The Bind message starts with the portal name.
         off += statementNameBuf.copy(msg, off); // Followed by the statement name. Both are terminated by null bytes.
         off = w16(msg, valueFormats.length, off); // After the names are the formats of the query parameters, this is an array of i16s where 0 means string and 1 means binary. Zero-length array sets everything to string, single element array sets everything to the element format.
@@ -197,38 +204,21 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
             }
         }
         off = w16(msg, 1, off); // Write a single-element response format array, meaning we want all query result columns in the same format.
-        off = w16(msg, format, off); // Write the result format. 0 for string, 1 for binary.
-        w32(msg, off-offset-1, offset+1); // Write the length of the bind message in the message header.
-        return off; // Return the offset after the bind message.
+        off = w16(msg, resultFormat, off); // Write the result format. 0 for string, 1 for binary.
+        return {msg, off}; // Return the Bind message buffer and the current write offset in case you want to append to it.
     }
-    bind(portalName, statementName, values=[], format=Client.STRING) { // Bind the parameters to a query. Return the results in the given format. 
-        const valueFormats = []; // Value formats tell PostgreSQL if we're giving it strings or binary data.
-        if (values.rowBuffer) valueFormats.push(values.dataFormat); // When called with a row, use its format as the parameter format.
-        else { // Otherwise parse the values array.
-            values = values.slice(); // Copy the values array so that we can replace the values with Buffer versions.
-            for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a Buffer, treat it as a binary PostgreSQL value.
-        }
+    bind(portalName, statementName, values=[], resultFormat=Client.STRING) { // Bind the parameters to a query. Return the results in the given format. 
         const portalNameBuf = Buffer.from(portalName + '\0'); // Turn the portalName string into a null-terminated C string.
         const statementNameBuf = Buffer.from(statementName + '\0'); // Ditto for the statementName string.
-        const msg = Buffer.allocUnsafe(this._prepareBindValues(portalNameBuf, statementNameBuf, values, valueFormats)); // Allocate a message buffer for the bind, converting values to buffers where needed.
-        this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, 0); // Write the bind message to the message buffer.
-        this._formatQueue.push(format); // Push the query format to the format queue so that queryHandlers know how to handle the data they receive.
+        const {msg, off} = this._bindBuf(portalNameBuf, statementNameBuf, values, resultFormat, 0); // Create the Bind message buffer.
         this._connection.write(msg); // Send the bind message to the server.
     }
-    bindExecuteSync(portalName, statementName, maxRows=0, values=[], format=Client.STRING) { // Bind the parameters to a query, execute it and sync, using a single write. Return the results in the given format. 
-        const valueFormats = []; // Value formats tell PostgreSQL if we're giving it strings or binary data.
-        if (values.rowBuffer) valueFormats.push(values.dataFormat); // When called with a row, use its format as the parameter format.
-        else { // Otherwise parse the values array.
-            values = values.slice(); // Copy the values array so that we can replace the values with Buffer versions.
-            for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a Buffer, treat it as a binary PostgreSQL value.
-        }
+    bindExecuteSync(portalName, statementName, maxRows=0, values=[], resultFormat=Client.STRING) { // Bind the parameters to a query, execute it and sync, using a single write. Return the results in the given format. 
         const portalNameBuf = Buffer.from(portalName + '\0'); // Turn the portalName string into a null-terminated C string.
         const statementNameBuf = Buffer.from(statementName + '\0'); // Ditto for the statementName string.
-        const msg = Buffer.allocUnsafe(this._prepareBindValues(portalNameBuf, statementNameBuf, values, valueFormats) + 14 + portalNameBuf.byteLength);
-        let off = this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, 0); // Write the bind message to the message buffer.
+        let {msg, off} = this._bindBuf(portalNameBuf, statementNameBuf, values, resultFormat, 14 + portalNameBuf.byteLength); // Create the Bind message buffer with enough space for the execute and sync at the end.
         off = this._writeExecuteBuf(msg, portalNameBuf, maxRows, off); // Write the execute message to the message buffer after the bind.
         msg[off] = 83; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // S -- Sync -- Write a sync message to the end of the message buffer.
-        this._formatQueue.push(format); // Push the query format to the format queue so that queryHandlers know how to handle the data they receive.
         this._connection.write(msg); // Send the bind, execute and sync messages to the server.
     }
     executeFlush(portalName, maxRows) { // Executes a portal and sends a flush to the server so that it doesn't buffer the results. (Important for partial result queries.)
@@ -260,21 +250,25 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         return parsed; // Return the cached statement descriptor or the one we just created.
     }
     startQuery(statement, values=[], format=Client.STRING, cacheStatement=true) { // Starts a partial results query. Call getResults to request the next batch of results. 
+        if (this.inQuery) throw Error("Already in query. Please sync() before starting a new query.")
         this.inQuery = this.parseStatement(statement, cacheStatement); // Set the inQuery to our statement descriptor so that we know that we're in a partial results query.
+        this.inQueryFormat = format; // Store query format to be used by getResults calls.
         this.bind('', this.inQuery.name, values, format); // Bind the query statement to the values and set the result format.
     }
     getResults(maxCount=0, stream=new RowReader()) { // Get the next maxCount results from a partial query. Use 0 as maxCount to request all remaining rows.
+        stream.binary = this.inQueryFormat; // Set stream format to the current query results format.
         this.executeFlush('', maxCount); // Execute the query portal and ask the server to send the results right away.
         return this.promise(stream, this.inQuery);  // Return a promise of the query results.
     } 
     query(statement, values=[], format=Client.STRING, cacheStatement=true, stream=new RowReader()) { // Send a query to the server and receive the results to the given stream in the given format.
+        stream.binary = format; // Set stream format to the query results format.
         const parsed = this.parseStatement(statement, cacheStatement); // Parse the query statement, optionally caching it as a prepared statement.
         this.bindExecuteSync('', parsed.name, 0, values, format); // Bind the query parameters and set the result format. Pass 0 as maxRows to return all the result rows.
-        return this.promise(stream, parsed); // Return a promise of the query results.
+        return this.promise(stream, parsed, format); // Return a promise of the query results.
     }
     copyData(buffer) { return this.bufferCmd(100, buffer); } // d -- CopyData -- Send a copy data buffer to the server.
     copyFail(buffer) { this.bufferCmd(102, buffer); return this.promise(null, null); } // f -- CopyFail -- Tell the server that the copy operation has failed for some reason.
-    copyDone(stream=new CopyReader()) { // Tell the server that we're finished copying data to the server.
+    copyDone(stream=new CopyReader()) { // Tell the server that we've finished copying data to the server.
         const msg = Buffer.allocUnsafe(10); // Allocate a message buffer for the CopyDone and Sync messages.
         msg[0]=99; msg[1]=0; msg[2]=0; msg[3]=0; msg[4]=4; // c -- CopyDone -- Write the CopyDone message at the start of the buffer.
         msg[5]=83; msg[6]=0; msg[7]=0; msg[8]=0; msg[9]=4; // S -- Sync -- Write a Sync message after CopyDone to commit the transaction.
@@ -287,9 +281,9 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
 Client.STRING = 0; // Enum for the string result format. Matches PostgreSQL protocol.
 Client.BINARY = 1; // Enum for the binary result format. Matches PostgreSQL protocol.
 class RowReader { // RowReader receives query result messages and converts them into query result rows.
-    constructor() { this.rows = [], this.cmd = this.oid = this.format = this.rowParser = undefined, this.rowCount = 0; } // Set up initial state.
+    constructor() { this.rows = [], this.cmd = this.oid = this.binary = this.rowParser = undefined, this.rowCount = 0; } // Set up initial state.
     write(buf, off=0) { switch(buf[off++]) { // Receive a PostgreSQL protocol message buffer.
-        case 68: return this.rows.push(new (this.rowParser[this.format])(buf)); // D -- DataRow -- Parse the row and store it to rows.
+        case 68: return this.rows.push(new (this.rowParser[this.binary])(buf)); // D -- DataRow -- Parse the row and store it to rows.
         case 100: return this.rows.push(buf.slice(off+4, off + r32(buf, off))); // CopyData -- Slice the copy message payload and store it to rows.
         case 67: // C -- CommandComplete -- Parse the command complete message and set our completion state.
             const str = buf.toString('utf8', 5, 1 + r32(buf, 1)); // The CommandComplete is a string starting with the completed command name and followed by possible table OID and number of rows affected. 

@@ -142,6 +142,13 @@ module.exports = async function runTest(client) {
     assert(result.rows[0][1].readInt32BE(0) === 256, "Large object wrong length");
     assert(result.rows[0][0].toString('hex') === bytes.toString('hex'), "Large object roundtrip failed");
 
+    // What happens if we sync several times?
+    client.sync();
+    client.sync();
+    client.sync();
+    client.sync();
+    await client.sync();
+
     // Partial queries
     await testProtocolState(client);
     t0 = Date.now();
