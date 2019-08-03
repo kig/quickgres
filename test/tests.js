@@ -128,8 +128,8 @@ module.exports = async function runTest(client) {
     for (var i = 0; i < 100; i++) {
         const randos = randomBytes();
         result = await client.query('SELECT $1::bytea, octet_length($1::bytea)', [randos], Client.BINARY);
-        assert(result.rows[0][0].toString('hex') === randos.toString('hex'), "Bytea roundtrip failed " + randos + " !== " + result.rows[0][0]);
-        assert(result.rows[0][1].readInt32BE(0) === randos.byteLength, "Bytea wrong length " + randos.byteLength + " !== " + result.rows[0][1]);
+        assert(result.rows[0][1].readInt32BE(0) === randos.byteLength, "Bytea wrong length " + randos.byteLength + " !== " + result.rows[0][1].readInt32BE(0));
+        assert(result.rows[0][0].toString('hex') === randos.toString('hex'), "Bytea roundtrip failed " + randos.toString('hex') + " !== " + result.rows[0][0].toString('hex'));
     }
 
     const bytes = Buffer.alloc(256);
