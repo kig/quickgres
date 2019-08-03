@@ -326,20 +326,28 @@ class RowParser { // RowParser parses DataRow buffers into objects and arrays.
         parserPrototype.rowColumns = this.columns; // Store the column information too, might be useful.
         for (let i = 0; i < this.columns.length; i++) { // Create column getters.
             const index = i; // Pull index into the local closure.
-            const getter = function() { // The getter at this index walks the row columns to find the column data.
+            const getter = {get: function() { // The getter at this index walks the row columns to find the column data.
                 let off = 7, buf = this.rowBuffer; // Set up walk state.
-                for (let j = 0; j < index; j++) { // Walk through columns to find the current index column.
-                    const columnLength = r32(buf, off); off += 4; // Read in the column length.
-                    if (columnLength >= 0) off += columnLength; // Skip over the column data.
+                if (this.columnOffsets === undefined) { // If we haven't cached the column offsets yet, let's do it.
+                    this.columnOffsets = new Array(this.columnCount*2); // Lookup table for column offsets and lengths.
+                    for (let i = 0; i < this.columnCount; i++) { // Walk through columns.
+                        const columnLength = r32(buf, off); off += 4; // Read in the column length.
+                        this.columnOffsets[i*2] = off; // Cache column offset.
+                        this.columnOffsets[i*2+1] = columnLength; // Cache column length.
+                        if (columnLength >= 0) off += columnLength; // Skip over the column data.
+                    }
                 }
-                const length = r32(buf, off); off += 4; // Read the length of the wanted column.
+                off = this.columnOffsets[index*2]; // Read the cached column offset
+                const length = this.columnOffsets[index*2+1]; // Read the length of the wanted column.
                 return length < 0 ? null : this.parseColumn(off, off+length); // Parse the column data unless it's a null.
-            };
-            Object.defineProperty(parserPrototype, this.columns[index].name, {get: getter}); // Bind the getter to the column name so that you can do `col = row.my_col`
-            Object.defineProperty(parserPrototype, index, {get: getter}); // Bind the getter to the column index so that you can do `col = row[3]`
+            }};
+            Object.defineProperty(parserPrototype, this.columns[index].name, getter); // Bind the getter to the column name so that you can do `col = row.my_col`
+            Object.defineProperty(parserPrototype, index, getter); // Bind the getter to the column index so that you can do `col = row[3]`
         }
         this[Client.BINARY] = function(buf) { this.rowBuffer = buf; }; // Binary row constructor just stores the DataRow buffer, it's parsed on access.
         this[Client.BINARY].prototype = Object.create(parserPrototype); // The prototype of the row stores the row description and methods to access columns. Note that all properties are camelCased to avoid name clashes with column names which are all lowercase.
+        this[Client.BINARY].prototype.dataFormat = Client.BINARY, // The binary rows have a binary data format.
+        this[Client.BINARY].prototype.parseColumn = function(start, end) { return this.rowBuffer.slice(start, end); }, // Parsing a binary column is just a slice.
         this[Client.STRING] = function(buf) { this.rowBuffer = buf; }; // A String row parser is a binary row parser with a different parseColumn method.
         this[Client.STRING].prototype = Object.create(parserPrototype); // Copy over the binary row prototype.
         this[Client.STRING].prototype.dataFormat = Client.STRING; // The string row parser's data format is string.
@@ -347,8 +355,6 @@ class RowParser { // RowParser parses DataRow buffers into objects and arrays.
     }
 }
 RowParser.parserPrototype = {
-    dataFormat: Client.BINARY, // The binary rows have a binary data format.
-    parseColumn: function(start, end) { return this.rowBuffer.slice(start, end); }, // Parsing a binary column is just a slice.
     toArray: function() { // Convert the row into a proper Array.
         let off = 7, buf = this.rowBuffer, dst = new Array(this.columnCount); // Create parsing state and result array.
         for (let i = 0; i < this.columnCount; i++) { // Go through the columns.
