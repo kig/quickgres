@@ -128,7 +128,7 @@ module.exports = async function runTest(client) {
     for (var i = 0; i < 100; i++) {
         const randos = randomBytes();
         result = await client.query('SELECT $1::bytea, octet_length($1::bytea)', [randos], Client.BINARY);
-        assert(result.rows[0][1].readInt32BE(0) === randos.byteLength, "Bytea wrong length " + randos.byteLength + " !== " + result.rows[0][1].readInt32BE(0));
+        assert(result.rows[0][1] === randos.byteLength, "Bytea wrong length " + randos.byteLength + " !== " + result.rows[0][1]);
         assert(result.rows[0][0].toString('hex') === randos.toString('hex'), "Bytea roundtrip failed " + randos.toString('hex') + " !== " + result.rows[0][0].toString('hex'));
     }
 
@@ -139,7 +139,7 @@ module.exports = async function runTest(client) {
     result = await client.query('SELECT lo_get(file), octet_length(lo_get(file)) FROM large_object_test WHERE name = $1', ['my_object'], Client.BINARY);
     await client.query('SELECT lo_unlink(file) FROM large_object_test WHERE name = $1', ['my_object']);
     await client.query('DROP TABLE large_object_test');
-    assert(result.rows[0][1].readInt32BE(0) === 256, "Large object wrong length");
+    assert(result.rows[0][1] === 256, "Large object wrong length");
     assert(result.rows[0][0].toString('hex') === bytes.toString('hex'), "Large object roundtrip failed");
 
     // Partial queries

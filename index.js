@@ -179,7 +179,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
     _prepareBindValues(portalNameBuf, statementNameBuf, values, valueFormats) { // Calculates the length of a Bind message and converts values to Buffers where needed.
         let bytes = portalNameBuf.byteLength + statementNameBuf.byteLength; // Add up all the buffer lengths here.
         if (values.rowBuffer) return (6 + (valueFormats.length * 2) + bytes + values.rowBuffer.byteLength); // Row from a RowParser. Copy it directly. 13B - 2B value count - 5B values.buf header + values.buf + value formats * 2B + bytes
-        else for (let i = 0; i < values.length; i++) if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength; // Convert non-null values to buffers and add their byteLength to total number of bytes.
+        else for (let i = 0; i < values.length; i++) if (values[i] !== null) values[i] = TypeParser.serialize(values[i]), bytes += values[i].byteLength; // Convert non-null values to buffers and add their byteLength to total number of bytes.
         return (13 + (valueFormats.length * 2) + (values.length * 4) + bytes); // 5B header + 2B value format count as i16 + 2B value count + 2B response format count + 2B single response format + bytes + values * i32 + valueFormats * i16
     }
     _writeBindBuf(msg, portalNameBuf, statementNameBuf, values, valueFormats, format, offset) { // Write a Bind message to the msg buffer, starting at the given offset.
@@ -220,7 +220,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         if (values.rowBuffer) valueFormats.push(values.dataFormat); // When called with a row, use its format as the parameter format.
         else { // Otherwise parse the values array.
             values = values.slice(); // Copy the values array so that we can replace the values with Buffer versions.
-            for (let i = 0; i < values.length; i++) valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // If a passed value is a Buffer, treat it as a binary PostgreSQL value.
+            for (let i = 0; i < values.length; i++) valueFormats[i] = typeof values[i] === 'string' ? 0 : 1; // If a passed value is a Buffer, treat it as a binary PostgreSQL value.
         }
         const portalNameBuf = Buffer.from(portalName + '\0'); // Turn the portalName string into a null-terminated C string.
         const statementNameBuf = Buffer.from(statementName + '\0'); // Ditto for the statementName string.
@@ -339,7 +339,7 @@ class RowParser { // RowParser parses DataRow buffers into objects and arrays.
                 }
                 off = this.columnOffsets[index*2]; // Read the cached column offset
                 const length = this.columnOffsets[index*2+1]; // Read the length of the wanted column.
-                return length < 0 ? null : this.parseColumn(off, off+length); // Parse the column data unless it's a null.
+                return length < 0 ? null : this.parseColumn(index, off, off+length); // Parse the column data unless it's a null.
             }};
             Object.defineProperty(parserPrototype, this.columns[index].name, getter); // Bind the getter to the column name so that you can do `col = row.my_col`
             Object.defineProperty(parserPrototype, index, getter); // Bind the getter to the column index so that you can do `col = row[3]`
@@ -347,11 +347,14 @@ class RowParser { // RowParser parses DataRow buffers into objects and arrays.
         this[Client.BINARY] = function(buf) { this.rowBuffer = buf; }; // Binary row constructor just stores the DataRow buffer, it's parsed on access.
         this[Client.BINARY].prototype = Object.create(parserPrototype); // The prototype of the row stores the row description and methods to access columns. Note that all properties are camelCased to avoid name clashes with column names which are all lowercase.
         this[Client.BINARY].prototype.dataFormat = Client.BINARY, // The binary rows have a binary data format.
-        this[Client.BINARY].prototype.parseColumn = function(start, end) { return this.rowBuffer.slice(start, end); }, // Parsing a binary column is just a slice.
+        this[Client.BINARY].prototype.parseColumn = function(i, start, end) {
+            const parser = TypeParser[this.rowColumns[i].typeOid];
+            return parser ? parser(this.rowBuffer, start, end) : this.rowBuffer.slice(start, end);
+        }, // Parsing a binary column is just a slice.
         this[Client.STRING] = function(buf) { this.rowBuffer = buf; }; // A String row parser is a binary row parser with a different parseColumn method.
         this[Client.STRING].prototype = Object.create(parserPrototype); // Copy over the binary row prototype.
         this[Client.STRING].prototype.dataFormat = Client.STRING; // The string row parser's data format is string.
-        this[Client.STRING].prototype.parseColumn = function(start, end) { return this.rowBuffer.toString('utf8', start, end); } // To parse a string column, convert a slice of the buffer into a string.
+        this[Client.STRING].prototype.parseColumn = function(i, start, end) { return this.rowBuffer.toString('utf8', start, end); } // To parse a string column, convert a slice of the buffer into a string.
     }
 }
 RowParser.parserPrototype = {
@@ -359,7 +362,7 @@ RowParser.parserPrototype = {
         let off = 7, buf = this.rowBuffer, dst = new Array(this.columnCount); // Create parsing state and result array.
         for (let i = 0; i < this.columnCount; i++) { // Go through the columns.
             const columnLength = r32(buf, off); off += 4; // Each column has an i32 length, followed by the column data.
-            if (columnLength >= 0) { dst[i] = this.parseColumn(off, off+columnLength); off += columnLength; } // Store the column data into the result array.
+            if (columnLength >= 0) { dst[i] = this.parseColumn(i, off, off+columnLength); off += columnLength; } // Store the column data into the result array.
             else dst[i] = null; // If the length is negative, the column is null.
         }
         return dst; // Return the result array.
@@ -368,10 +371,50 @@ RowParser.parserPrototype = {
         let off = 7, buf = this.rowBuffer, dst = {}; // Set up parsing state and result object. Off 7 skips over the header and column count (which we know already.)
         for (let i = 0; i < this.columnCount; i++) { // Go through the columns.
             const columnLength = r32(buf, off); off += 4; // Read the length of the column.
-            if (columnLength >= 0) { dst[this.rowColumns[i].name] = this.parseColumn(off, off+columnLength); off += columnLength; } // Parse column into result object property.
+            if (columnLength >= 0) { dst[this.rowColumns[i].name] = this.parseColumn(i, off, off+columnLength); off += columnLength; } // Parse column into result object property.
             else dst[this.rowColumns[i].name] = null; // A negative length means a null value.
         }
         return dst; // Return the result object.
     }
+};
+TypeParser = {
+    serialize: function(value) {
+        if (value instanceof Buffer) return Buffer.from(value);
+        const t = typeof value;
+        let b;
+        if (t === 'boolean') {
+            b = Buffer.allocUnsafe(1);
+            b[0] = value ? 1 : 0;
+        } else if (t === 'number') {
+            b = Buffer.allocUnsafe(4);
+            if ((value | 0) === value) b.writeInt32BE(value);
+            else b.writeFloatBE(value);
+        } else if (t === 'bigint') {
+            b = Buffer.allocUnsafe(8);
+            b.writeBigInt64BE(value);
+        } else if (t === 'string') {
+            b = Buffer.from(value);
+        } else if (t === 'object') {
+            b = Buffer.from(JSON.stringify(value));
+        }
+        return b;
+    },
+    16: (buf, start, end) => !!buf[start], // bool
+    17: (buf, start, end) => buf.slice(start, end), // bytea
+    18: (buf, start, end) => buf[start], // char
+    19: (buf, start, end) => buf.toString('utf8', start, buf.indexOf(0, start)), // name
+    20: (buf, start, end) => buf.readBigInt64BE(start), // int8
+    21: (buf, start, end) => r16(buf, start), // int2
+    // 22 int2vector
+    23: (buf, start, end) => r32(buf, start), // int4
+    // 24 regproc
+    25: (buf, start, end) => buf.toString('utf8', start, end), // text
+    26: (buf, start, end) => r32(buf, start), // oid
+    114: (buf, start, end) => buf.toString('utf8', start, end), // json
+    142: (buf, start, end) => buf.toString('utf8', start, end), // xml
+    700: (buf, start, end) => buf.readFloatBE(start), // float4
+    701: (buf, start, end) => buf.readDoubleBE(start), // float8
+    1043: (buf, start, end) => buf.toString('utf8', start, end), // varchar
+    3802: (buf, start, end) => buf.toString('utf8', start, end) // jsonb
 };
 module.exports = { Client, RowReader, RowParser }; // Export the Client and the row parsing classes.
