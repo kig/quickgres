@@ -1,7 +1,7 @@
 const cluster = require('cluster');
-const numCPUs = 16;
+const numCPUs = require('os').cpus().length;
 const numQueries = 12800 / numCPUs;
-const numConns = Math.floor(32 / numCPUs);
+const numConns = Math.floor(4*numCPUs / numCPUs);
 const numRounds = 100;
 const port = '/tmp/.s.PGSQL.5432'
 const host = undefined;
