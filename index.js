@@ -112,7 +112,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
             break;
         case 69: // E -- Error -- There was an error in handling the query, reject the current queryHandler promise.
             this._queryHandlers[0] = {resolve: function() {}}; // Error is followed by ReadyForQuery, this will eat that.
-            queryHandler.reject(Error(`${buf[off]} ${buf.toString('utf8', off+1, off+length-4).replace(/\0/g, ' ')}`)); // Reject the current query with the error message from the server.
+            queryHandler.reject(Error(`PostgreSQL Error: ${buf[off]} ${buf.toString('utf8', off+1, off+length-4).replace(/\0/g, ' ')}`)); // Reject the current query with the error message from the server.
             break;
         case 83: // S -- ParameterStatus -- Server parameters are received at the start of the connection, but may also arrive at any time.
             const [key, value] = buf.toString('utf8', off, off + length - 5).split('\0'); // Split the parameter into a key-value pair.
@@ -184,7 +184,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
             values = values.slice(); // Copy values and convert them to Buffers.
             for (let i = 0; i < values.length; i++) { // Go through the copy of values, converting values to buffers and determining value formats.
                 valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // Buffer parameters are passed as binary to PostgreSQL.
-                if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength; // Convert non-null values to buffers and add their byteLength to total number of bytes.
+                if (values[i] != null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength; // Convert non-null/undefined values to buffers and add their byteLength to total number of bytes.
             }
             bindMessageLength = (13 + (values.length * 4 + valueFormats.length * 2) + bytes); // 5B header + 2B value format count as i16 + 2B value count + 2B response format count + 2B single response format + bytes + values * i32 + valueFormats * i16
         }
@@ -199,7 +199,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         else { // Otherwise go through the values and write them out.
             off = w16(msg, values.length, off); // The values array starts with a i16 length.
             for (let i = 0; i < values.length; i++) { // And is followed by a i32 length and a payload for each element.
-                if (values[i] === null) off = w32(msg, -1, off); // Null values have a length of -1 and no payload.
+                if (values[i] == null) off = w32(msg, -1, off); // Null/undefined values have a length of -1 and no payload.
                 else off = w32(msg, values[i].byteLength, off), off += values[i].copy(msg, off); // Other values have a length followed by the value bytes.
             }
         }
