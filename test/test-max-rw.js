@@ -1,5 +1,5 @@
 const cluster = require('cluster');
-const numCPUs = 16;
+const numCPUs = 8;
 const numQueries = 12800 / numCPUs;
 const numConns = Math.floor(32 / numCPUs);
 const numRounds = 100;
@@ -17,12 +17,12 @@ if (cluster.isMaster) {
         }
     });
 } else {
-    const { Client, ArrayReader } = require('..');
+    const { Client } = require('..');
 
     var result = 0, resolveWait;
 
     async function sessionRW(client, id, i) {
-        const {rows: [[uid, data]]} = await client.query('SELECT u.id, u.data FROM sessions_copy s, users_copy2 u WHERE s.id = $1 AND s.deleted = FALSE AND s.owner = u.id', [id], new ArrayReader());
+        const {rows: [[uid, data]]} = await client.query('SELECT u.id, u.data FROM sessions_copy s, users_copy2 u WHERE s.id = $1 AND s.deleted = FALSE AND s.owner = u.id', [id]);
         await client.query('UPDATE users_copy2 SET data = $1 WHERE id = $2', [data.split('').reverse().join(''), uid]);
         result++;
         if (result === numQueries) resolveWait();

@@ -12,10 +12,10 @@ if (cluster.isMaster) {
         }
     });
 } else {
-    const { Client, ArrayReader } = require('..');
+    const { Client } = require('..');
 
     async function sessionR(client, id) {
-        await client.query('SELECT * FROM sessions_copy s WHERE s.id = $1 AND s.deleted = FALSE', [id], new ArrayReader());
+        await client.query('SELECT * FROM sessions_copy s WHERE s.id = $1 AND s.deleted = FALSE', [id]);
     }
 
     async function go() {

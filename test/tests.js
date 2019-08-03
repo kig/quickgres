@@ -56,7 +56,7 @@ function randomBytes() {
     for (let i = 0; i < buf.byteLength; i++) {
         buf[i] = (Math.random() * 256) | 0;
     }
-    return '\\x' + buf.toString('hex');
+    return buf;
 }
 
 function randomString() {
@@ -69,21 +69,25 @@ module.exports = async function runTest(client) {
 
 
     for (var i = 0; i < 100; i++) {
-        const randos = randomBytes();
+        const randB = randomBytes();
+        const randos = '\\x' + randB.toString('hex');
         result = await client.query('SELECT $1::bytea, octet_length($1::bytea)', [randos]);
         assert(result.rows[0][0] === randos, "Bytea roundtrip failed " + randos + " !== " + result.rows[0][0]);
         assert(parseInt(result.rows[0][1]) === randos.length/2-1, "Bytea wrong length " + (randos.length/2-1) + " !== " + result.rows[0][1]);
+        result = await client.query('SELECT $1::bytea, octet_length($1::bytea)', [randB], 1);
+        assert(result.rows[0][0].toString('hex') === randB.toString('hex'), "Bytea roundtrip failed " + randB.toString('hex') + " !== " + result.rows[0][0].toString('hex'));
+        assert(result.rows[0][1].readInt32BE(0) === randB.byteLength, "Bytea wrong length " + randB.byteLength + " !== " + result.rows[0][1].readInt32BE(0));
     }
 
     const bytes = Buffer.alloc(256);
     for (var i = 0; i < 256; i++) bytes[i] = i;
     await client.query('CREATE TABLE IF NOT EXISTS large_object_test (name text, file oid)');
     await client.query('INSERT INTO large_object_test (name, file) VALUES ($1, lo_from_bytea(0, $2))', ['my_object', '\\x' + bytes.toString('hex')]);
-    result = await client.query('SELECT lo_get(file), octet_length(lo_get(file)) FROM large_object_test WHERE name = $1', ['my_object']);
+    result = await client.query('SELECT lo_get(file), octet_length(lo_get(file)) FROM large_object_test WHERE name = $1', ['my_object'], 1);
     await client.query('SELECT lo_unlink(file) FROM large_object_test WHERE name = $1', ['my_object']);
     await client.query('DROP TABLE large_object_test');
-    assert(parseInt(result.rows[0][1]) === 256, "Large object wrong length");
-    assert(result.rows[0][0] === '\\x' + bytes.toString('hex'), "Large object roundtrip failed");
+    assert(result.rows[0][1].readInt32BE(0) === 256, "Large object wrong length");
+    assert(result.rows[0][0].toString('hex') === bytes.toString('hex'), "Large object roundtrip failed");
 
     // Partial queries
     await testProtocolState(client);
@@ -180,6 +184,12 @@ module.exports = async function runTest(client) {
     console.error(1000 * result / (Date.now() - t0), 'inserts per second');
     promises.splice(0);
     copyResult = null;
+    result = null;
+
+    await testProtocolState(client);
+    t0 = Date.now();
+    result = await client.query('SELECT * FROM users', [], 1);
+    console.error(1000 * result.rows.length / (Date.now() - t0), 'binary query rows per second');
     result = null;
 
     await testProtocolState(client);

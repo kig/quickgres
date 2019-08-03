@@ -37,10 +37,7 @@ class Client {
         });
         this._connection.on('error', this.onError.bind(this));
     }
-    end() { 
-        this.zeroParamCmd(88); // X -- Terminate
-        return this._connection.end();
-    }
+    end() { this.zeroParamCmd(88); this._connection.destroy(); } // X -- Terminate
     onError(err) {
         if (err.message.startsWith('connect EAGAIN ')) this._connect();
         else this._outStreams.splice(0).forEach(s => s.reject(err));
@@ -151,38 +148,39 @@ class Client {
         off = w32(wbuf, maxRows, off);
         return off;
     }
-    _bindBufLength(portalNameBuf, statementNameBuf, values) {
+    _bindBuf(portalNameBuf, statementNameBuf, values, resultFormat, extraBytes=0) {
+        const valueFormats = [], bufValues = [];
         let bytes = portalNameBuf.byteLength + statementNameBuf.byteLength;
-        for (let i = 0; i < values.length; i++) if (values[i] !== null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength;
-        return (15 + (values.length * 4) + bytes);
-    }
-    _writeBindBuf(msg, portalNameBuf, statementNameBuf, values, resultFormat) {
+        for (let i = 0; i < values.length; i++) {
+            valueFormats[i] = values[i] instanceof Buffer ? 1 : 0;
+            if (values[i] !== null) bufValues[i] = Buffer.from(values[i]), bytes += bufValues[i].byteLength;
+            else bufValues[i] = null;
+        }
+        const msg = Buffer.allocUnsafe((13 + (bufValues.length * 6) + bytes) + extraBytes);
         let off = 5; msg[0] = 66; // B -- Bind
         off += portalNameBuf.copy(msg, off);
         off += statementNameBuf.copy(msg, off);
-        off = w32(msg, 0x00010000, off);
-        off = w16(msg, values.length, off);
-        for (let i = 0; i < values.length; i++) {
-            if (values[i] === null) off = w32(msg, -1, off);
-            else off = w32(msg, values[i].byteLength, off), off += values[i].copy(msg, off);
+        off = w16(msg, valueFormats.length, off);
+        for (let i = 0; i < valueFormats.length; i++) off = w16(msg, valueFormats[i], off);
+        off = w16(msg, bufValues.length, off);
+        for (let i = 0; i < bufValues.length; i++) {
+            if (bufValues[i] === null) off = w32(msg, -1, off);
+            else off = w32(msg, bufValues[i].byteLength, off), off += bufValues[i].copy(msg, off);
         }
-        off = w32(msg, 0x00010000, off);
+        off = w32(msg, 0x00010000 | resultFormat, off);
         w32(msg, off-1, 1);
-        return off;
+        return {msg, off};
     }
     bind(portalName, statementName, values=[], resultFormat=0) {
-        values = values.slice();
         const portalNameBuf = Buffer.from(portalName + '\0');
         const statementNameBuf = Buffer.from(statementName + '\0');
-        const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values));
-        this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, resultFormat);
+        const {msg, off} = this._bindBuf(portalNameBuf, statementNameBuf, values, resultFormat, 0);
         this._connection.write(msg);
     }
     bindExecuteSync(portalName, statementName, maxRows=0, values=[], resultFormat=0) {
         const portalNameBuf = Buffer.from(portalName + '\0');
         const statementNameBuf = Buffer.from(statementName + '\0');
-        const msg = Buffer.allocUnsafe(this._bindBufLength(portalNameBuf, statementNameBuf, values) + 14 + portalNameBuf.byteLength);
-        let off = this._writeBindBuf(msg, portalNameBuf, statementNameBuf, values, resultFormat);
+        let {msg, off} = this._bindBuf(portalNameBuf, statementNameBuf, values, resultFormat, 14 + portalNameBuf.byteLength);
         off = this._writeExecuteBuf(msg, portalNameBuf, maxRows, off);
         msg[off] = 83; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // S -- Sync
         this._connection.write(msg);
@@ -217,33 +215,38 @@ class Client {
         }
         return parsed;
     }
-    startQuery(statement, values=[], cacheStatement=true) {
+    startQuery(statement, values=[], resultFormat=0, cacheStatement=true) {
         this.inQuery = this.parseStatement(statement, cacheStatement);
-        this.bind('', this.inQuery.name, values);
+        this.inQueryResultFormat = resultFormat ? 1 : 0;
+        this.bind('', this.inQuery.name, values, resultFormat);
     }
-    getResults(maxCount=0, stream=new RowReader()) {
+    getResults(maxCount=0, stream=new Result()) {
+        stream.binary = this.inQueryResultFormat;
         this.executeFlush('', maxCount);
         return this.promise(stream, this.inQuery);
     }
-    query(statement, values=[], stream=new RowReader(), cacheStatement=true) {
+    query(statement, values=[], resultFormat=0, cacheStatement=true, stream=new Result()) {
+        stream.binary = resultFormat ? 1 : 0;
         const parsed = this.parseStatement(statement, cacheStatement);
-        this.bindExecuteSync('', parsed.name, 0, values);
+        this.bindExecuteSync('', parsed.name, 0, values, resultFormat);
         return this.promise(stream, parsed);
     }
-    copyDone(stream=new RowReader()) {
+    copyDone(stream=new Result()) {
         const msg = Buffer.allocUnsafe(10);
         msg[0]=99; msg[1]=0; msg[2]=0; msg[3]=0; msg[4]=4; // c -- CopyDone
         msg[5]=83; msg[6]=0; msg[7]=0; msg[8]=0; msg[9]=4; // S -- Sync
         this._connection.write(msg);
         return this.promise(stream, null);
     } 
-    sync(stream=new RowReader()) { this.zeroParamCmd(83); return this.promise(stream, null); }
+    sync(stream=new Result()) { this.zeroParamCmd(83); return this.promise(stream, null); }
     cancel() { return new Client({...this.config, cancel: this.backendKey}).connect(this.address, this.host, this.ssl); }
 }
-class RowReader {
+class Result {
     constructor() { this.rows = [], this.cmd = this.oid = this.rowParser = undefined, this.rowCount = 0; }
     write(buf, off=0) { switch(buf[off++]) {
-        case 68: return this.rows.push(this.rowParser.parseArray(buf, off+6, [])); // D -- DataRow
+        case 68: 
+            buf = this.binary === 0 ? buf : Buffer.from(buf.slice(off-1, off + r32(buf, off)));
+            return this.rows.push(this.rowParser.parse(buf, off+6, [], this.binary)); // D -- DataRow
         case 100: return this.rows.push(Buffer.from(buf.slice(off+4, off + r32(buf, off)))); // CopyData
         case 67: // C -- CommandComplete
             const str = buf.toString('utf8', off+4, off + r32(buf, off));
@@ -261,10 +264,9 @@ class RowReader {
 }
 class RowParser {
     constructor(buf, off=0) {
-        this.fields = [], this.fieldNames = [];
-        this.fieldCount = r16(buf, off+5); off += 7;
+        this.fields = []; this.fieldCount = r16(buf, off+5); off += 7;
         for (let i = 0; i < this.fieldCount; i++) {
-            const nameEnd =  buf.indexOf(0, off);
+            const nameEnd = buf.indexOf(0, off);
             const name = buf.toString('utf8', off, nameEnd); off = nameEnd + 1;
             const tableOid = r32(buf, off); off += 4;
             const tableColumnIndex = r16(buf, off); off += 2;
@@ -273,16 +275,17 @@ class RowParser {
             const typeModifier = r32(buf, off); off += 4;
             const binary = r16(buf, off); off += 2;
             const field = { name, tableOid, tableColumnIndex, typeOid, typeLen, typeModifier, binary };
-            this.fields.push(field);
+            this.fields[i] = field;
         }
     }
-    parseArray(buf, off, dst) {
+    parse(buf, off, dst, binary) {
         for (let i = 0; i < this.fieldCount; i++) {
             const fieldLength = r32(buf, off); off += 4;
             if (fieldLength < 0) dst[i] = null;
-            else dst[i] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
+            else if (binary === 0) dst[i] = buf.toString('utf8', off, off + fieldLength), off += fieldLength;
+            else dst[i] = buf.slice(off, off + fieldLength), off += fieldLength;
         }
         return dst;
     }
 }
-module.exports = { Client, RowReader, RowParser };
+module.exports = { Client, Result, RowParser };

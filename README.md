@@ -1,8 +1,8 @@
-# Quickgres 0.2.2-rc1
+# Quickgres 0.2.3b
 
 Quickgres is a native-JS PostgreSQL client library.
 
-It's around 400 lines of code, with no external dependencies.
+It's around 300 lines of code, with no external dependencies.
 
 Features
  * Queries with parameters (along with prepared statements and portals).
@@ -13,14 +13,15 @@ Features
  * Partial query readback.
  * You should be able to execute 2GB size queries (If you want to store movies in TOAST columns? (Maybe use large objects instead.)) I haven't tried it though.
  * Canceling long running queries.
+ * Binary parameters and return values
  
 Lacking
  * Full test suite
  * SASL authentication
  * Streaming replication (For your JavaScript DB synced via WAL shipping?)
  * No type parsing (This is more like a feature.)
- * Binary values?
  * Simple queries are deprecated in favor of parameterized queries.
+ * Results as objects (This is to optimize Array results performance.)
 
 What's it good for? It's relatively small so you can read it. It doesn't have deps, so you don't need to worry about npm dephell. Mostly use it for bed-time reading.
 
@@ -30,26 +31,19 @@ Performance-wise it's ok.
 ## Usage 
 
 ```javascript
-const { Client, ArrayReader } = require('quickgres'); 
+const { Client } = require('quickgres'); 
 
 async function go() {
     const client = new Client({ user: 'myuser', database: 'mydb', password: 'mypass' });
     await client.connect('/tmp/.s.PGSQL.5432'); // Connect to a UNIX socket.
     // await client.connect(5432, 'localhost'); // Connect to a TCP socket.
+    // await client.connect(5432, 'localhost', {}); // Connect to a SSL socket. See tls.connect for config obj details.
     console.error(client.serverParameters);
-
-    // Get rows parsed to JS objects.
-    let { rows, completes } = await client.query(
-        'SELECT name, email FROM users WHERE id = $1', ['1234']);
-    console.log(rows[0].name, rows[0].email, completes[0].rowCount);
 
     // Get rows parsed to arrays.
     let { rows, completes } = await client.query(
-        'SELECT name, email FROM users WHERE id = $1', ['1234'], new ArrayReader());
+        'SELECT name, email FROM users WHERE id = $1', ['1234']);
     console.log(rows[0][0], rows[0][1], completes[0].rowCount);
-
-    // Stream raw query results protocol to stdout (why waste cycles on parsing data...)
-    await client.query('SELECT name, email FROM users WHERE id = $1', ['1234'], process.stdout);
 
     // Query execution happens in a pipelined fashion, so when you do a million 
     // random SELECTs, they get written to the server right away, and the server
@@ -73,10 +67,10 @@ async function go() {
     }
 
     // Copy data
-    const copyResult = await client.copy('COPY users TO STDOUT (FORMAT binary)');
+    const copyResult = await client.query('COPY users TO STDOUT (FORMAT binary)');
     console.log(copyResult.rows[0]);
 
-    const copyIn = await client.copy('COPY users_copy FROM STDIN (FORMAT binary)');
+    const copyIn = await client.query('COPY users_copy FROM STDIN (FORMAT binary)');
     console.log(copyIn.columnFormats);
     copyResult.rows.forEach(row => client.copyData(row));
     await client.copyDone();
@@ -89,6 +83,8 @@ go();
 
 ## Changelog
 
+ * 0.2.3b: Parallel universe branch that optimizes array of string results query performance to the hilt.
+
  * 0.2.2-rc1: Request canceling with `cancel`, made statement caching optional, tests for bytea roundtrips and large objects, recover from connection-time `EAGAIN`, squeeze to 349 lines.
 
  * 0.2.1: Allocate exact size message write buffers (yay), removed `describe` methods, more tests, inlined row parsers, added RawReader, minor optimizations, cut lines to 365 from 441.
@@ -97,50 +93,46 @@ go();
 
 ## Test output
 
-On a 13" Macbook Pro 2018 (2.3 GHz Intel Core i5), PostgreSQL 11.3.
+On a 13" Macbook Pro 2018 (2.3 GHz Intel Core i5), 8 GB RAM, NVMe SSD, PostgreSQL 11.3.
 
 ```bash
 $ node test/test.js testdb
 received 1000011 rows
-385360.6936416185 'partial query (100 rows per execute) rows per second'
+435355.2459730083 'partial query (100 rows per execute) rows per second'
 received 10000 rows
-357142.85714285716 'partial query (early exit) rows per second'
+384615.3846153846 'partial query (early exit) rows per second'
 warming up 30000 / 30000     
-41436.46408839779 'random queries per second'
-665786.2849533955 'query raw rows per second'
-388353.786407767 'query rows per second'
+40983.60655737705 'random queries per second'
+443463.8580931264 'query rows per second'
 Cancel test: 83 ERROR VERROR C57014 Mcanceling statement due to user request Fpostgres.c L3070 RProcessInterrupts  
-Elapsed: 3 ms
-444646.9542018675 'query array rows per second'
+Elapsed: 5 ms
 Deleted 1000011 rows from users_copy
-39735.09933774835 'inserts per second'
-539671.3437668645 'text copyTo rows per second'
-495791.2741695588 'csv copyTo rows per second'
-697358.4379358438 'binary copyTo rows per second'
+38610.03861003861 'inserts per second'
+572416.1419576417 'text copyTo rows per second'
+491647.49262536876 'csv copyTo rows per second'
+793660.3174603175 'binary copyTo rows per second'
 Deleted 30000 rows from users_copy
-385509.63762528915 'binary copyFrom rows per second'
+372721.58032053674 'binary copyFrom rows per second'
 
 done
 
 Testing SSL connection
 received 1000011 rows
-364435.4956268222 'partial query (100 rows per execute) rows per second'
+430667.95865633077 'partial query (100 rows per execute) rows per second'
 received 10000 rows
-322580.6451612903 'partial query (early exit) rows per second'
+370370.3703703704 'partial query (early exit) rows per second'
 warming up 30000 / 30000     
-28680.688336520077 'random queries per second'
-700778.5564120533 'query raw rows per second'
-412205.68837592745 'query rows per second'
+30150.75376884422 'random queries per second'
+493345.33793783915 'query rows per second'
 Cancel test: 83 ERROR VERROR C57014 Mcanceling statement due to user request Fpostgres.c L3070 RProcessInterrupts  
-Elapsed: 134 ms
-439565.2747252747 'query array rows per second'
+Elapsed: 110 ms
 Deleted 1000011 rows from users_copy
-29097.963142580018 'inserts per second'
-610507.326007326 'text copyTo rows per second'
-582078.5797438882 'csv copyTo rows per second'
-882623.1244483672 'binary copyTo rows per second'
+29440.62806673209 'inserts per second'
+638984.6645367412 'text copyTo rows per second'
+613503.6809815951 'csv copyTo rows per second'
+898483.3782569632 'binary copyTo rows per second'
 Deleted 30000 rows from users_copy
-319492.6517571885 'binary copyFrom rows per second'
+400485.38245895074 'binary copyFrom rows per second'
 
 done
 
@@ -152,47 +144,11 @@ The `max-r` one is just fetching a full a session row based on session id, so it
 
 ```bash
 $ node test/test-max-rw.js testdb
-    29232 session RWs per second              
+    31254 session RWs per second              
 done
 
 $ node test/test-max-r.js testdb
-    119673 session Rs per second              
-done
-```
-
-On a 16-core server, 2xE5-2650v2, 64 GB ECC DDR3 and Optane. (NB the `numCPUs` and connections per CPU have been tuned.)
-
-```bash
-$ node test/test-max-rw.js testdb
-    82215 session RWs per second              
-done
-
-$ node test/test-max-r.js testdb
-    308969 session Rs per second              
-done
-```
-
-On a 16-core workstation, TR 2950X, 32 GB ECC DDR4 and flash SSD.
-
-```bash
-$ node test/test-max-rw.js testdb
-    64717 session RWs per second              
-done
-
-$ node test/test-max-r.js testdb
-    750755 session Rs per second              
-done
-```
-
-Running server on the Optane 16-core machine, doing requests over the network from the other 16-core machine.
-
-```bash
-$ node test/test-max-rw.js testdb
-    101201 session RWs per second              
-done
-
-$ node test/test-max-r.js testdb
-    496499 session Rs per second               
+    141002 session Rs per second              
 done
 
 ```
