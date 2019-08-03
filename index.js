@@ -76,6 +76,7 @@ class Client {
                 if (packet.index === packet.length) {
                     this.processPacket(packet.buf, packet.cmd, packet.length, 5, this._outStreams[0]);
                     packet.cmd = packet.index = 0;
+                    if (packet.buf.length > 2e6) packet.buf = Buffer.allocUnsafe(0); // Release buffer after large packets.
                 }
             }
         }
