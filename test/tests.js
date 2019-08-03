@@ -201,6 +201,15 @@ module.exports = async function runTest(client) {
     result = null;
 
     await testProtocolState(client);
+    ws = require('fs').createWriteStream('test_str.dat');
+    t0 = Date.now();
+    result = await client.query('SELECT * FROM users', [], Client.STRING, true, ws);
+    await ws.end();
+    console.error(1000 * 1000011 / (Date.now() - t0), 'string query rows per second piped to test_str.dat');
+    result = null;
+    require('fs').unlinkSync('test_str.dat');
+
+    await testProtocolState(client);
     t0 = Date.now();
     result = await client.query('SELECT * FROM users', []);
     console.error(1000 * result.rows.length / (Date.now() - t0), 'query rows per second');
