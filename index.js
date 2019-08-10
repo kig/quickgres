@@ -17,6 +17,12 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         this._queryHandlers = []; // Internal queue of query result handlers, called in order when receiving query results.
         this.serverParameters = {}; // Parameters received from the PostgreSQL server on connecting. Stuff like {server_encoding: 'UTF8'}
         this.config = config; // Store the config for later use.
+        this._zeroParamMsgBufs = {};
+        this._readyForQueryBuf = Buffer.from([90,0,0,0,5,0]);
+        this._completeBuf = Buffer.alloc(1024);
+        this.packetStats = new Int32Array(256);
+        this.packetLengths = new Int32Array(256);
+        this._emptyPortalBuf = Buffer.alloc(1); // Turn the portalName string into a null-terminated C string.
     }
     connect(address, host, ssl) { // Connects to either a UNIX socket or a TCP socket, with optional SSL encryption. See Node.js net.createConnection.
         this.address = address, this.host = host, this.ssl = ssl; // Store the connection parameters for later use.
@@ -66,18 +72,47 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
                 this._packet.head[this._packet.index++] = buf[i++]; // Copy length bytes to header buffer, advancing byte counters.
                 if (this._packet.index === 4) { // That was the last length byte.
                     this._packet.length = r32(this._packet.head, 0); // Parse length as int32BE and store for later.
-                    this._packet.buf = Buffer.allocUnsafe(this._packet.length + 1); // Allocate a message buffer to receive the rest of the packet.
-                    this._packet.buf[0] = this._packet.cmd; // Copy the already received bytes to the start of the buffer.
-                    this._packet.buf[1] = this._packet.head[0]; this._packet.buf[2] = this._packet.head[1]; this._packet.buf[3] = this._packet.head[2]; this._packet.buf[4] = this._packet.head[3];
+                    this.packetStats[this._packet.cmd]++;
+                    this.packetLengths[this._packet.cmd] |= (this._packet.length > 4) ? 1 : 0;
+                    if (this._packet.length === 4) {
+                        this._packet.buf = this._zeroParamMsgBufs[this._packet.cmd];
+                        if (!this._packet.buf) this._zeroParamMsgBufs[this._packet.cmd] = this._packet.buf = Buffer.from([this._packet.cmd, 0, 0, 0, 4]);
+                        this.processPacket(this._packet.buf, this._packet.cmd, this._packet.length, 5, this._queryHandlers[0]); // Pass packet to protocol parser.
+                        this._packet.cmd = this._packet.index = this._packet.length = 0; this._packet.buf = null; // Reset the packet.
+                        continue;
+                    } else if (this._packet.cmd === 90) {
+                        this._packet.buf = this._readyForQueryBuf;
+                    } else if (i > 4 && buf.byteLength - i-4 >= this._packet.length) {
+                        this._packet.buf = buf.slice(i-5, i-4+this._packet.length);
+                        i += this._packet.length-4;
+                        this.processPacket(this._packet.buf, this._packet.cmd, this._packet.length, 5, this._queryHandlers[0]); // Pass packet to protocol parser.
+                        this._packet.cmd = this._packet.index = this._packet.length = 0; this._packet.buf = null; // Reset the packet.
+                        continue;
+                    } else if (this._packet.cmd === 67) {
+                        this._packet.buf = this._completeBuf;
+                        this._packet.buf[0] = this._packet.cmd; // Copy the already received bytes to the start of the buffer.
+                        this._packet.buf[1] = this._packet.head[0]; this._packet.buf[2] = this._packet.head[1]; this._packet.buf[3] = this._packet.head[2]; this._packet.buf[4] = this._packet.head[3];
+                    } else {
+                        this._packet.buf = Buffer.allocUnsafe(this._packet.length + 1); // Allocate a message buffer to receive the rest of the packet.
+                        this._packet.buf[0] = this._packet.cmd; // Copy the already received bytes to the start of the buffer.
+                        this._packet.buf[1] = this._packet.head[0]; this._packet.buf[2] = this._packet.head[1]; this._packet.buf[3] = this._packet.head[2]; this._packet.buf[4] = this._packet.head[3];
+                    }
                 }
             }
             if (this._packet.index >= 4) { // If the packet header is complete, copy the packet body to the message buffer.
-                const copiedBytes = buf.copy(this._packet.buf, this._packet.index+1, i, i + (this._packet.length - this._packet.index)); // Copy buf to _packet.buf, up to the length of the packet + 1 for the command byte.
-                this._packet.index += copiedBytes; // Advance byte counters to keep track where in the packet we currently are.
-                i += copiedBytes; // Advance loop byte counter by the amount of bytes processed thus far.
+                if (i < buf.byteLength) {
+                    if (this._packet.cmd === 90) {
+                        this._packet.index++;
+                        this._packet.buf[5] = buf[i++];
+                    } else {
+                        const copiedBytes = buf.copy(this._packet.buf, this._packet.index+1, i, i + (this._packet.length - this._packet.index)); // Copy buf to _packet.buf, up to the length of the packet + 1 for the command byte.
+                        this._packet.index += copiedBytes; // Advance byte counters to keep track where in the packet we currently are.
+                        i += copiedBytes; // Advance loop byte counter by the amount of bytes processed thus far.
+                    }
+                }
                 if (this._packet.index === this._packet.length) { // If the packet is complete, process it and get ready for the next packet.
                     this.processPacket(this._packet.buf, this._packet.cmd, this._packet.length, 5, this._queryHandlers[0]); // Pass packet to protocol parser.
-                    this._packet.cmd = this._packet.index = this._packet.length = 0; // Reset the packet.
+                    this._packet.cmd = this._packet.index = this._packet.length = 0; this._packet.buf = null; // Reset the packet.
                 }
             }
         }
@@ -87,28 +122,34 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
             queryHandler.stream.rowParser = queryHandler.parsed.rowParser; // Set the output stream's row data parser.
             queryHandler.stream.write(buf); // Write the DataRow packet to the output stream for further processing.
             break;
-        case 100: // CopyData -- Copy data rows are written directly to the output stream.
-            queryHandler.stream.write(buf); // Write the CopyData packet to the output stream for further processing.
-            break;
-        case 84: // T -- RowDescription -- Describes the column names and types of a query result. Parsed into a RowParser and cached. Written to output stream as well.
-            queryHandler.parsed.rowParser = new RowParser(buf); // Create new RowParser from the packet and cache it to the current prepared statement.
-        case 73: case 72: case 99: // EmptyQueryResponse / CopyOutResponse / CopyDone -- These are written to the output stream for further processing.
-            queryHandler.stream.write(buf);
-        case 110: case 116: case 49: case 50: case 51: // NoData / ParameterDescription / {Parse,Bind,Close}Complete -- These are ignored.
-            break;
         case 67: // C -- CommandComplete -- The last DataRow is followed by a CommandComplete. Written to output stream.
             if (this.inQuery) this.zeroParamCmd(83); // S -- Sync -- In startQuery-getResult partial queries we need to sync after the command is complete, this commits the query's implicit transaction.
             queryHandler.stream.write(buf); // Write the complete to output stream to let it know the query is finished.
+            break;
+        case 50: // BindComplete
+            break;
+        case 90: // Z -- ReadyForQuery -- Done with the current query, resolve it. Received at the start of the connection, after a Sync, or after an Error.
+            this.inQuery = null; // End partial query.
+            this.transactionStatus = buf[5]; // I = idle, T = in a transaction block, E = in a failed transaction block.
+            this._queryHandlers.shift(); // Advance query output streams.
+            queryHandler.resolve(queryHandler.stream); // Resolve the current query's promise.
             break;
         case 115: case 71: case 87: // PortalSuspended / CopyInResponse / CopyBothResponse -- Two-part query flow messages. Resolve promises and get written to the output stream.
             queryHandler.stream.write(buf); // Pass the results to either query.getResult stream or CopyIn stream.
             this._queryHandlers.shift(); // Advance _queryHandlers.
             queryHandler.resolve(queryHandler.stream); // Resolve the partial query or CopyInResponse promise.
             break;
-        case 90: // Z -- ReadyForQuery -- Done with the current query, resolve it. Received at the start of the connection, after a Sync, or after an Error.
-            this.inQuery = null; // End partial query.
-            this._queryHandlers.shift(); // Advance query output streams.
-            queryHandler.resolve(queryHandler.stream); // Resolve the current query's promise.
+        case 100: // CopyData -- Copy data rows are written directly to the output stream.
+            queryHandler.stream.write(buf); // Write the CopyData packet to the output stream for further processing.
+            break;
+        case 84: // T -- RowDescription -- Describes the column names and types of a query result. Parsed into a RowParser and cached. Written to output stream as well.
+            queryHandler.parsed.rowParser = new RowParser(buf); // Create new RowParser from the packet and cache it to the current prepared statement.
+            queryHandler.stream.write(buf);
+            break;
+        case 73: case 72: case 99: // EmptyQueryResponse / CopyOutResponse / CopyDone -- These are written to the output stream for further processing.
+            queryHandler.stream.write(buf);
+            break;
+        case 110: case 116: case 49: case 51: // NoData / ParameterDescription / {Parse,Bind,Close}Complete -- These are ignored.
             break;
         case 69: // E -- Error -- There was an error in handling the query, reject the current queryHandler promise.
             this._queryHandlers[0] = {resolve: function() {}}; // Error is followed by ReadyForQuery, this will eat that.
@@ -184,7 +225,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
             values = values.slice(); // Copy values and convert them to Buffers.
             for (let i = 0; i < values.length; i++) { // Go through the copy of values, converting values to buffers and determining value formats.
                 valueFormats[i] = values[i] instanceof Buffer ? 1 : 0; // Buffer parameters are passed as binary to PostgreSQL.
-                if (values[i] != null) values[i] = Buffer.from(values[i]), bytes += values[i].byteLength; // Convert non-null/undefined values to buffers and add their byteLength to total number of bytes.
+                if (values[i] != null) values[i] = (valueFormats[i] ? values[i] : Buffer.from(values[i])), bytes += values[i].byteLength; // Convert non-null/undefined values to buffers and add their byteLength to total number of bytes.
             }
             bindMessageLength = (13 + (values.length * 4 + valueFormats.length * 2) + bytes); // 5B header + 2B value format count as i16 + 2B value count + 2B response format count + 2B single response format + bytes + values * i32 + valueFormats * i16
         }
@@ -207,22 +248,17 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         off = w16(msg, resultFormat, off); // Write the result format. 0 for string, 1 for binary.
         return {msg, off}; // Return the Bind message buffer and the current write offset in case you want to append to it.
     }
-    bind(portalName, statementName, values=[], resultFormat=Client.STRING) { // Bind the parameters to a query. Return the results in the given format. 
-        const portalNameBuf = Buffer.from(portalName + '\0'); // Turn the portalName string into a null-terminated C string.
-        const statementNameBuf = Buffer.from(statementName + '\0'); // Ditto for the statementName string.
+    bind(portalNameBuf, statementNameBuf, values=[], resultFormat=Client.STRING) { // Bind the parameters to a query. Return the results in the given format. 
         const {msg, off} = this._bindBuf(portalNameBuf, statementNameBuf, values, resultFormat, 0); // Create the Bind message buffer.
         this._connection.write(msg); // Send the bind message to the server.
     }
-    bindExecuteSync(portalName, statementName, maxRows=0, values=[], resultFormat=Client.STRING) { // Bind the parameters to a query, execute it and sync, using a single write. Return the results in the given format. 
-        const portalNameBuf = Buffer.from(portalName + '\0'); // Turn the portalName string into a null-terminated C string.
-        const statementNameBuf = Buffer.from(statementName + '\0'); // Ditto for the statementName string.
+    bindExecuteSync(portalNameBuf, statementNameBuf, maxRows=0, values=[], resultFormat=Client.STRING) { // Bind the parameters to a query, execute it and sync, using a single write. Return the results in the given format. 
         let {msg, off} = this._bindBuf(portalNameBuf, statementNameBuf, values, resultFormat, 14 + portalNameBuf.byteLength); // Create the Bind message buffer with enough space for the execute and sync at the end.
         off = this._writeExecuteBuf(msg, portalNameBuf, maxRows, off); // Write the execute message to the message buffer after the bind.
         msg[off] = 83; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // S -- Sync -- Write a sync message to the end of the message buffer.
         this._connection.write(msg); // Send the bind, execute and sync messages to the server.
     }
-    executeFlush(portalName, maxRows) { // Executes a portal and sends a flush to the server so that it doesn't buffer the results. (Important for partial result queries.)
-        const portalNameBuf = Buffer.from(portalName + '\0'); // Turn the portalName string into a null-terminated C string for PostgreSQL protocol.
+    executeFlush(portalNameBuf, maxRows) { // Executes a portal and sends a flush to the server so that it doesn't buffer the results. (Important for partial result queries.)
         const msg = Buffer.allocUnsafe(14 + portalNameBuf.byteLength); // Allocate message buffer, 5B Execute header, portal name, 4B maxRows and 5B Flush message.
         let off = this._writeExecuteBuf(msg, portalNameBuf, maxRows, 0); // Write the execute message to the message buffer.
         msg[off] = 72; msg[++off] = 0; msg[++off] = 0; msg[++off] = 0; msg[++off] = 4; // H -- Flush -- Write the flush to the end of the message.
@@ -244,6 +280,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         let parsed = this._parsedStatements[statement]; // Have we cached this already?
         if (!parsed) { // If the statement is not cached, let's prepare it.
             parsed = {name: cacheStatement ? (this._parsedStatementCount++).toString() : '', rowParser: null}; // Create statement descriptor. If cacheStatement is true, create a uniquely named prepared statement.
+            parsed.nameBuf = Buffer.from(parsed.name + '\0');
             if (cacheStatement) this._parsedStatements[statement] = parsed; // If we're creating a prepared statement, add the statement descriptor to the statement lookup table.
             this.parseAndDescribe(parsed.name, statement); // Ask the server to parse and describe the statement, we'll catch the RowDescriptor in the processPacket loop.
         }
@@ -253,17 +290,17 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
         if (this.inQuery) throw Error("Already in query. Please sync() before starting a new query.")
         this.inQuery = this.parseStatement(statement, cacheStatement); // Set the inQuery to our statement descriptor so that we know that we're in a partial results query.
         this.inQueryFormat = format; // Store query format to be used by getResults calls.
-        this.bind('', this.inQuery.name, values, format); // Bind the query statement to the values and set the result format.
+        this.bind(this._emptyPortalBuf, this.inQuery.nameBuf, values, format); // Bind the query statement to the values and set the result format.
     }
     getResults(maxCount=0, stream=new RowReader()) { // Get the next maxCount results from a partial query. Use 0 as maxCount to request all remaining rows.
         stream.binary = this.inQueryFormat; // Set stream format to the current query results format.
-        this.executeFlush('', maxCount); // Execute the query portal and ask the server to send the results right away.
+        this.executeFlush(this._emptyPortalBuf, maxCount); // Execute the query portal and ask the server to send the results right away.
         return this.promise(stream, this.inQuery);  // Return a promise of the query results.
     } 
     query(statement, values=[], format=Client.STRING, cacheStatement=true, stream=new RowReader()) { // Send a query to the server and receive the results to the given stream in the given format.
         stream.binary = format; // Set stream format to the query results format.
         const parsed = this.parseStatement(statement, cacheStatement); // Parse the query statement, optionally caching it as a prepared statement.
-        this.bindExecuteSync('', parsed.name, 0, values, format); // Bind the query parameters and set the result format. Pass 0 as maxRows to return all the result rows.
+        this.bindExecuteSync(this._emptyPortalBuf, parsed.nameBuf, 0, values, format); // Bind the query parameters and set the result format. Pass 0 as maxRows to return all the result rows.
         return this.promise(stream, parsed, format); // Return a promise of the query results.
     }
     copyData(buffer) { return this.bufferCmd(100, buffer); } // d -- CopyData -- Send a copy data buffer to the server.

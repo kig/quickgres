@@ -73,6 +73,20 @@ module.exports = async function runTest(client) {
     let t0, result, copyResult, ws;
     let promises = [], count = 0;
 
+    promises.splice(0);
+    await testProtocolState(client);
+    t0 = Date.now();
+    var id = Buffer.from(Math.floor(Math.random() * 1000000).toString());
+    var params = [id];
+    for (var i = 0; i < 30000; i++) {
+        promises.push(client.query('SELECT * FROM users WHERE email = $1', params, Client.BINARY));
+    }
+    result = await Promise.all(promises);
+    console.error(1000 * result.length / (Date.now() - t0), 'single-row-hitting queries per second');
+    promises.splice(0);
+    result = null;
+    return;
+
     { // README examples
         assert(client.serverParameters.server_encoding, "Server parameters didn't receive an encoding");
 
@@ -199,6 +213,19 @@ module.exports = async function runTest(client) {
     promises.splice(0);
     result = null;
 
+    promises.splice(0);
+    await testProtocolState(client);
+    t0 = Date.now();
+    var id = Buffer.from(Math.floor(Math.random() * 1000000).toString());
+    var params = [id];
+    for (var i = 0; i < 30000; i++) {
+        promises.push(client.query('SELECT * FROM users WHERE email = $1', params, Client.BINARY));
+    }
+    result = await Promise.all(promises);
+    console.error(1000 * result.length / (Date.now() - t0), 'single-row-hitting queries per second');
+    promises.splice(0);
+    result = null;
+
     await testProtocolState(client);
     ws = require('fs').createWriteStream('test.dat');
     t0 = Date.now();
@@ -318,7 +345,6 @@ module.exports = async function runTest(client) {
     result = await client.query('COPY users TO STDOUT (FORMAT csv)');
     console.error(1000 * result.rows.length / (Date.now() - t0), 'csv copyTo rows per second');
     // console.error(result.rows[0].toString());
-
 
     await testProtocolState(client);
     t0 = Date.now();
