@@ -85,7 +85,6 @@ module.exports = async function runTest(client) {
     console.error(1000 * result.length / (Date.now() - t0), 'single-row-hitting queries per second');
     promises.splice(0);
     result = null;
-    return;
 
     { // README examples
         assert(client.serverParameters.server_encoding, "Server parameters didn't receive an encoding");

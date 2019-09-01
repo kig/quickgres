@@ -1,4 +1,4 @@
-# Quickgres 0.3.1
+# Quickgres 0.4.0
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -14,6 +14,7 @@ Features
  * You should be able to execute 2GB size queries (If you want to store movies in TOAST columns? (Maybe use large objects instead.)) I haven't tried it though.
  * Canceling long running queries.
  * Binary params, binary query results.
+ * Fast raw protocol pass-through to output stream
 
 Lacking
  * Full test suite
@@ -99,6 +100,8 @@ go();
 ```
 
 ## Changelog
+
+ * 0.4.0: Optimized allocations, efficient raw protocol pass-through, client-side protocol parsing lib.
 
  * 0.3.1: Treating undefined as null in query parameters. DB error messages start with 'PostgreSQL Error:'.
 
@@ -220,4 +223,5 @@ done
 Ilmari Heikkinen <hei@heichen.hk>
 
 ## License
-MIT
+
+Commercial license: 0.001% of annual world-wide group revenue. If your company has sales of $100k a year, this is $1 per year.
