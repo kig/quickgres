@@ -224,4 +224,5 @@ Ilmari Heikkinen <hei@heichen.hk>
 
 ## License
 
-Commercial license: 0.001% of annual world-wide group revenue. If your company has sales of $100k a year, this is $1 per year.
+Commercial license: 0.001% of annual world-wide group revenue. 
+For example, if your company has sales of $100k a year, this is $1 per year.

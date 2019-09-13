@@ -1,9 +1,9 @@
 {
   "name": "quickgres",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Quick native-JS PostgreSQL client library",
   "main": "index.js",
   "repository": "https://github.com/kig/quickgres",
   "author": "Ilmari Heikkinen <hei@heichen.hk>",
-  "license": "MIT"
+  "license": "Revenue Sharing License"
 }
