@@ -149,6 +149,14 @@ RowParser.parserPrototype = {
     }
 };
 
+const toUtf8 = function(buf) {
+    if (typeof TextDecoder !== 'undefined') {
+        return new TextDecoder().decode(buf);
+    } else {
+        buf.toString();
+    }
+};
+
 export const TypeParser = {
     serialize: function(value) {
         if (value instanceof Buffer) return Buffer.from(value);
@@ -174,7 +182,7 @@ export const TypeParser = {
     16: (buf, start, end) => !!buf[start], // bool
     17: (buf, start, end) => buf.slice(start, end), // bytea
     18: (buf, start, end) => buf[start], // char
-    19: (buf, start, end) => buf.toString('utf8', start, buf.indexOf(0, start)), // name
+    19: (buf, start, end) => toUtf8(buf.slice(start, buf.indexOf(0, start))), // name
     20: (buf, start, end) => buf.readBigInt64BE(start), // int8
     21: (buf, start, end) => r16(buf, start), // int2
     // 22 int2vector
@@ -200,13 +208,13 @@ export const TypeParser = {
         const hex = buf.slice(start, end).toString('hex');
         return hex.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
     },
-    25: (buf, start, end) => buf.toString('utf8', start, end), // text
+    25: (buf, start, end) => toUtf8(buf.slice(start, end)), // text
     26: (buf, start, end) => r32(buf, start), // oid
-    114: (buf, start, end) => JSON.parse(buf.toString('utf8', start, end)), // json
-    142: (buf, start, end) => buf.toString('utf8', start, end), // xml
+    114: (buf, start, end) => JSON.parse(toUtf8(buf.slice(start, end))), // json
+    142: (buf, start, end) => toUtf8(buf.slice(start, end)), // xml
     700: (buf, start, end) => buf.readFloatBE(start), // float4
     701: (buf, start, end) => buf.readDoubleBE(start), // float8
-    1043: (buf, start, end) => buf.toString('utf8', start, end), // varchar
-    3802: (buf, start, end) => JSON.parse(buf.toString('binary', start+1, end)) // jsonb
+    1043: (buf, start, end) => toUtf8(buf.slice(start, end)), // varchar
+    3802: (buf, start, end) => JSON.parse(toUtf8(buf.slice(start+1, end))) // jsonb
 };
 
