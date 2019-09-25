@@ -73,9 +73,7 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
                 switch (this._packet.cmd) {
                     case 90: // ReadyForQuery
                         // Switching query handlers, write all received data to current queryHandler.
-                        // console.log('write to stream', this.streamStart, i-1);
                         if (this.streamStart !== -1 && this._queryHandlers[0].stream) {
-                            // console.log('end write to stream', this.streamStart, i-1);
                             this._queryHandlers[0].stream.write(buf.slice(this.streamStart, i-1));
                         }
                         this.streamStart = -1;
@@ -84,7 +82,6 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
                         // Start passing data to receiving stream in large chunks, if the stream is not a RowReader.
                         if (this.streamStart === -1 && this._queryHandlers[0].stream.pipe) {
                             this.streamStart = i-1; // Start copying from this byte if we're not already copying.
-                            // console.log('start streaming', i-1);
                         }
                         break;
                 }
@@ -94,35 +91,33 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
                     this._packet.length = r32(this._packet.head, 0); // Parse length as int32BE and store for later.
                     if (this.streamStart === -1) { // Deal with packet directly if we're not streaming.
                         if (this._packet.length === 4) { // If the packet has no payload, use a cached buffer.
-                            this._packet.buf = this._zeroParamMsgBufs[this._packet.cmd];
-                            if (!this._packet.buf) this._zeroParamMsgBufs[this._packet.cmd] = this._packet.buf = Buffer.from([this._packet.cmd, 0, 0, 0, 4]);
+                            this._packet.buf = this._zeroParamMsgBufs[this._packet.cmd]; // Grab cached packet buffer.
+                            if (!this._packet.buf) this._zeroParamMsgBufs[this._packet.cmd] = this._packet.buf = Buffer.from([this._packet.cmd, 0, 0, 0, 4]); // If there's no cached buffer, create one.
                             this.processPacket(this._packet.buf, this._packet.cmd, this._packet.length, 5, this._queryHandlers[0]); // Pass packet to protocol parser.
                             this._packet.cmd = this._packet.index = this._packet.length = 0; this._packet.buf = null; // Reset the packet.
-                            continue;
-                        } else if (this._packet.cmd === 90) {
-                            this._packet.buf = this._readyForQueryBuf;
+                            continue; // Continue iterating through the buffer.
+                        } else if (this._packet.cmd === 90) { // Special-case Ready For Query, it's a 5-byte packet.
+                            this._packet.buf = this._readyForQueryBuf; // Use RFQ buffer for the packet.
                         } else { // Otherwise allocate a new buffer and stuff the packet there.
                             this._packet.buf = Buffer.allocUnsafe(this._packet.length + 1); // Allocate a message buffer to receive the rest of the packet.
                             this._packet.buf[0] = this._packet.cmd; // Copy the already received bytes to the start of the buffer.
-                            this._packet.buf[1] = this._packet.head[0]; this._packet.buf[2] = this._packet.head[1]; this._packet.buf[3] = this._packet.head[2]; this._packet.buf[4] = this._packet.head[3];
+                            this._packet.buf[1] = this._packet.head[0]; this._packet.buf[2] = this._packet.head[1]; this._packet.buf[3] = this._packet.head[2]; this._packet.buf[4] = this._packet.head[3]; // Copy the length of the packet to the buffer.
                         }
-                    // } else {
-                        // console.log('stream packet');
                     }
                 }
             }
             if (this._packet.index >= 4) { // If the packet header is complete, copy the packet body to the message buffer.
-                if (i < buf.byteLength) {
+                if (i < buf.byteLength) { // Haven't reached the end of the packet yet, copy payload to buffer.
                     if (this.streamStart === -1) { // Not streaming, copy packet contents here.
-                        if (this._packet.cmd === 90) {
+                        if (this._packet.cmd === 90) { // Ready For Query special case.
                             this._packet.index++;
-                            this._packet.buf[5] = buf[i++];
-                        } else {
+                            this._packet.buf[5] = buf[i++]; // Copy RFQ payload to packet buffer.
+                        } else { // Copy packet payload from received buffer to packet buffer.
                             const copiedBytes = buf.copy(this._packet.buf, this._packet.index+1, i, i + (this._packet.length - this._packet.index)); // Copy buf to _packet.buf, up to the length of the packet + 1 for the command byte.
                             this._packet.index += copiedBytes; // Advance byte counters to keep track where in the packet we currently are.
                             i += copiedBytes; // Advance loop byte counter by the amount of bytes processed thus far.
                         }
-                    } else {
+                    } else { // Streaming, advance stream counters.
                         let ni = i + this._packet.length - this._packet.index;
                         if (ni > buf.byteLength) ni = buf.byteLength;
                         this._packet.index += ni - i;
@@ -131,16 +126,14 @@ class Client { // The Client class wraps a connection socket to a PostgreSQL dat
                 }
                 if (this._packet.index === this._packet.length) { // If the packet is complete, process it and get ready for the next packet.
                     if (this.streamStart === -1) this.processPacket(this._packet.buf, this._packet.cmd, this._packet.length, 5, this._queryHandlers[0]); // Pass packet to protocol parser.
-                    // else console.log('packet streamed', this.streamStart, i);
                     this._packet.cmd = this._packet.index = this._packet.length = 0; this._packet.buf = null; // Reset the packet.
                 }
             }
         }
-        if (this.streamStart !== -1) { // Are we writing to a receiving stream?
-            // console.log('write to stream', this.streamStart, buf.byteLength);
+        if (this.streamStart !== -1) { // Are we writing to a receiving stream at the end of the buffer?
             if (this.streamStart === 0) this._queryHandlers[0].stream.write(buf); // Pass the whole buffer if we're starting from 0
             else this._queryHandlers[0].stream.write(buf.slice(this.streamStart)); // If starting from mid-buffer, slice instead.
-            this.streamStart = 0;
+            this.streamStart = 0; // Continue streaming in the next received buffer.
         }
     }
     processPacket(buf, cmd, length, off, queryHandler) { switch(cmd) { // Process a protocol packet and write it to the output stream if needed.
