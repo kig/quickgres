@@ -215,13 +215,30 @@ module.exports = async function runTest(client) {
     promises.splice(0);
     await testProtocolState(client);
     t0 = Date.now();
-    var id = Buffer.from(Math.floor(Math.random() * 1000000).toString());
-    var params = [id];
-    for (var i = 0; i < 30000; i++) {
-        promises.push(client.query('SELECT * FROM users WHERE email = $1', params, Client.BINARY));
+    var params = [];
+    for (var i = 0; i < 10000; i++) {
+        promises.push(client.query('SELECT * FROM users LIMIT 100', params, Client.BINARY));
     }
     result = await Promise.all(promises);
-    console.error(1000 * result.length / (Date.now() - t0), 'single-row-hitting queries per second');
+    console.error(100000 * result.length / (Date.now() - t0), '100-row query rows per second');
+    promises.splice(0);
+    result = null;
+
+    promises.splice(0);
+    await testProtocolState(client);
+    t0 = Date.now();
+    var params = [];
+    const nullStream = {
+        pipe: true,
+        writes: 0,
+        write: function(buf) { this.writes++; }
+    };
+    for (var i = 0; i < 10000; i++) {
+        promises.push(client.query('SELECT * FROM users LIMIT 100', params, Client.BINARY, true, nullStream));
+    }
+    result = await Promise.all(promises);
+    console.error(100000 * result.length / (Date.now() - t0), 'streamed 100-row query rows per second');
+    console.error(nullStream.writes / promises.length, 'stream writes per query');
     promises.splice(0);
     result = null;
 
