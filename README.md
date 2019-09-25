@@ -15,6 +15,7 @@ Features
  * Canceling long running queries.
  * Binary params, binary query results.
  * Fast raw protocol pass-through to output stream
+ * Client-side library for parsing PostgreSQL query results in the browser
 
 Lacking
  * Full test suite
@@ -23,9 +24,10 @@ Lacking
  * No type parsing (This is more like a feature.)
  * Simple queries are deprecated in favor of parameterized queries.
 
-What's it good for? It's relatively small so you can read it. It doesn't have deps, so you don't need to worry about npm dephell. Mostly use it for bed-time reading.
-
-Performance-wise it's ok.
+What's it good for? 
+ * It's relatively small so you can read it.
+ * It doesn't have deps, so you don't need to worry about npm dephell.
+ * Performance-wise it's ok. Think 100,000 DB-hitting HTTP/2 requests per second on a 16-core server.
 
 
 ## Usage 
@@ -55,7 +57,7 @@ async function go() {
         ['adb42e46-d1bc-4b64-88f4-3e754ab52e81'], 
         Client.STRING, // Or Client.BINARY. Controls the format of data that PostgreSQL sends you.
         true, // Cache the parsed query (default is true. If you use the query text only once, set this to false.)
-        process.stdout // The result stream. Client calls stream.write(buffer) on this. See ObjectReader for details.
+        process.stdout // The result stream. Client calls stream.write(buffer) on this. See RowReader for details.
     );
 
     // Binary data
@@ -121,48 +123,74 @@ On a 13" Macbook Pro 2018 (2.3 GHz Intel Core i5), PostgreSQL 11.3.
 
 ```bash
 $ node test/test.js testdb
-received 1000011 rows
-443463.8580931264 'partial query (100 rows per execute) rows per second'
+46656.29860031104 'single-row-hitting queries per second'
+268059 268059 1
+268059 268059 1
+
+README tests done
+
+received 1000016 rows
+573403.6697247706 'partial query (100 rows per execute) rows per second'
 received 10000 rows
-400000 'partial query (early exit) rows per second'
+454545.45454545453 'partial query (early exit) rows per second'
 warming up 30000 / 30000     
-33632.28699551569 'random queries per second'
-558041.8526785715 'query rows per second'
-668456.550802139 'binary query rows per second'
-493588.8450148075 'binary query rows as arrays per second' 10000110
-322792.4467398322 'query rows as objects per second' 1000011
-Cancel test: 83 ERROR VERROR C57014 Mcanceling statement due to user request Fpostgres.c L3070 RProcessInterrupts  
-Elapsed: 3 ms
-Deleted 1000011 rows from users_copy
-32292.787944025833 'inserts per second'
-457670.938215103 'text copyTo rows per second'
-415459.4931449938 'csv copyTo rows per second'
-594537.4554102259 'binary copyTo rows per second'
+38510.91142490372 'random queries per second'
+670241.2868632708 '100-row query rows per second'
+925069.3802035153 'streamed 100-row query rows per second'
+3.0024 'stream writes per query'
+1170973.0679156908 'binary query rows per second piped to test.dat'
+916600.3666361136 'string query rows per second piped to test_str.dat'
+595247.619047619 'query rows per second'
+359717.9856115108 'query rows as arrays per second' 10000160
+346505.8905058905 'query rows as objects per second' 1000016
+808420.3718674212 'binary query rows per second'
+558980.4359977641 'binary query rows as arrays per second' 10000160
+426264.27962489345 'binary query rows as objects per second' 1000016
+Cancel test: PostgreSQL Error: 83 ERROR VERROR C57014 Mcanceling statement due to user request Fpostgres.c L3070 RProcessInterrupts  
+Elapsed: 18 ms
+Deleted 1000016 rows from users_copy
+47021.94357366771 'binary inserts per second'
+530794.0552016986 'text copyTo rows per second'
+461474.8500230734 'csv copyTo rows per second'
+693974.3233865371 'binary copyTo rows per second'
 Deleted 30000 rows from users_copy
-238041.418709831 'binary copyFrom rows per second'
+328089.56692913384 'binary copyFrom rows per second'
 
 done
 
 Testing SSL connection
-received 1000011 rows
-499007.48502994014 'partial query (100 rows per execute) rows per second'
+30959.752321981425 'single-row-hitting queries per second'
+268059 268059 1
+268059 268059 1
+
+README tests done
+
+received 1000016 rows
+454346.2062698773 'partial query (100 rows per execute) rows per second'
 received 10000 rows
-416666.6666666667 'partial query (early exit) rows per second'
+454545.45454545453 'partial query (early exit) rows per second'
 warming up 30000 / 30000     
-30864.197530864196 'random queries per second'
-725171.1385061638 'query rows per second'
-848905.7724957555 'binary query rows per second'
-617290.7407407408 'binary query rows as arrays per second' 10000110
-369007.74907749076 'query rows as objects per second' 1000011
-Cancel test: 83 ERROR VERROR C57014 Mcanceling statement due to user request Fpostgres.c L3070 RProcessInterrupts  
-Elapsed: 14 ms
-Deleted 1000011 rows from users_copy
-30060.120240480963 'inserts per second'
-607171.2204007286 'text copyTo rows per second'
-602416.265060241 'csv copyTo rows per second'
-901724.0757439134 'binary copyTo rows per second'
+23094.688221709006 'random queries per second'
+577034.0450086555 '100-row query rows per second'
+745156.4828614009 'streamed 100-row query rows per second'
+3 'stream writes per query'
+1019379.2048929663 'binary query rows per second piped to test.dat'
+605333.5351089588 'string query rows per second piped to test_str.dat'
+508655.13733468973 'query rows per second'
+277243.13834211254 'query rows as arrays per second' 10000160
+252848.54614412136 'query rows as objects per second' 1000016
+722033.21299639 'binary query rows per second'
+432907.3593073593 'binary query rows as arrays per second' 10000160
+393242.62681871804 'binary query rows as objects per second' 1000016
+Cancel test: PostgreSQL Error: 83 ERROR VERROR C57014 Mcanceling statement due to user request Fpostgres.c L3070 RProcessInterrupts  
+Elapsed: 41 ms
+Deleted 1000016 rows from users_copy
+33407.57238307349 'binary inserts per second'
+528829.1909042834 'text copyTo rows per second'
+501010.0200400802 'csv copyTo rows per second'
+801295.6730769231 'binary copyTo rows per second'
 Deleted 30000 rows from users_copy
-373976.06581899774 'binary copyFrom rows per second'
+222176.62741612975 'binary copyFrom rows per second'
 
 done
 
@@ -174,13 +202,15 @@ The `max-r` one is just fetching a full a session row based on session id, so it
 
 ```bash
 $ node test/test-max-rw.js testdb
-    29232 session RWs per second              
+    32574 session RWs per second              
 done
 
 $ node test/test-max-r.js testdb
-    119673 session Rs per second              
+    130484 session Rs per second              
 done
 ```
+
+Yes, the laptop hits Planetary-1: one request per day per person on the planet. On the RW-side, it could serve 2.8 billion requests per day. Note that the test DB fits in RAM, so if you actually wanted to store 1k of data per person, you'd need 10 TB of RAM to hit this performance with 10 billion people.
 
 On a 16-core server, 2xE5-2650v2, 64 GB ECC DDR3 and Optane. (NB the `numCPUs` and connections per CPU have been tuned.)
 
