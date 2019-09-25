@@ -32,7 +32,6 @@ async function go() {
     // console.log('froms', froms);
 
     // console.log(Array.prototype.map.call(client.packetStats, (e,i) => e ? `${i}: ${e}, varLen: ${client.packetLengths[i]}` : null).filter(s => s).join("\n"));
-    process.exit();
 
     console.error("Testing SSL connection");
     require('./test-ssl');
