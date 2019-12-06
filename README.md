@@ -1,4 +1,4 @@
-# Quickgres 0.4.0
+# Quickgres 0.4.1
 
 Quickgres is a native-JS PostgreSQL client library.
 
@@ -254,5 +254,8 @@ Ilmari Heikkinen <hei@heichen.hk>
 
 ## License
 
-Commercial license: 0.001% of annual world-wide group revenue. 
-For example, if your company has sales of $100k a year, this is $1 per year.
+MIT
+
+## Support
+
+Heichen Ltd at hei@heichen.hk
