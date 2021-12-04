@@ -1,4 +1,4 @@
-# Quickgres 0.4.1
+# Quickgres 0.4.2
 
 Quickgres is a native-JS PostgreSQL client library.
 

@@ -193,14 +193,14 @@ export const TypeParser = {
     // 1266 timetz
     1114: (buf, start, end) => { // 1114 timestamp
         const dv = new DataView(buf.buffer.slice(start, end));
-        const t = dv.getInt32(0, false);
-        const t2 = dv.getInt32(4, false);
+        const t = dv.getUint32(0, false);
+        const t2 = dv.getUint32(4, false);
         return new Date((t * 4294967.296) + t2 / 1000 + 946656000000);
     },
     1184: (buf, start, end) => { // 1184 timestamptz
         const dv = new DataView(buf.buffer.slice(start, end));
-        const t = dv.getInt32(0, false);
-        const t2 = dv.getInt32(4, false);
+        const t = dv.getUint32(0, false);
+        const t2 = dv.getUint32(4, false);
         return new Date((t * 4294967.296) + t2 / 1000 + 946656000000);
     },
     // 1186 interval
